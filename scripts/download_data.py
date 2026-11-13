@@ -1,30 +1,23 @@
-# Level 1: Thư viện chuẩn Python (Standard Library)
-import os
+import argparse
 import sys
-from collections import Counter
+from pathlib import Path
 
-# Level 2: Thư viện bên thứ ba (Third-party Packages)
-import pandas as pd
 from datasets import load_dataset
+import pandas as pd
 from sklearn.model_selection import GroupShuffleSplit
 
-# Level 3: Module nội bộ trong dự án (Project-Local Imports)
-# (Chưa có module nội bộ cho bước data preparation)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-DATASET_NAME = "cnamuangtoun/resume-job-description-fit"
-DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
-RAW_DIR = os.path.join(DATA_DIR, "raw")
-PROCESSED_DIR = os.path.join(DATA_DIR, "processed")
-RANDOM_STATE = 42
-TRAIN_RATIO = 0.70
-VAL_RATIO = 0.15
-TEST_RATIO = 0.15
-
-LABEL_MAP = {
-    "No Fit": 0,
-    "Potential Fit": 1,
-    "Good Fit": 2,
-}
+from src.config import (
+    DEFAULT_DATASET_NAME,
+    DEFAULT_RANDOM_STATE,
+    DEFAULT_TRAIN_RATIO,
+    LABEL_MAP,
+    PROCESSED_DIR,
+    RAW_DIR,
+)
 
 
 def download_and_combine(dataset_name: str) -> pd.DataFrame:
@@ -32,8 +25,7 @@ def download_and_combine(dataset_name: str) -> pd.DataFrame:
     ds = load_dataset(dataset_name)
     df_train = ds["train"].to_pandas()
     df_test = ds["test"].to_pandas()
-    df_all = pd.concat([df_train, df_test], ignore_index=True)
-    return df_all
+    return pd.concat([df_train, df_test], ignore_index=True)
 
 
 def assign_job_ids(df: pd.DataFrame) -> pd.DataFrame:
@@ -48,10 +40,9 @@ def assign_job_ids(df: pd.DataFrame) -> pd.DataFrame:
 
 def split_by_job_group(
     df: pd.DataFrame,
-    train_ratio: float = 0.70,
-    random_state: int = 42,
+    train_ratio: float = DEFAULT_TRAIN_RATIO,
+    random_state: int = DEFAULT_RANDOM_STATE,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Chia dữ liệu thành Train / Val / Test theo nhóm job_id để triệt tiêu Data Leakage."""
     gss1 = GroupShuffleSplit(n_splits=1, train_size=train_ratio, random_state=random_state)
     train_idx, temp_idx = next(gss1.split(df, groups=df["job_id"]))
 
@@ -73,7 +64,6 @@ def verify_splits(
     val_df: pd.DataFrame,
     test_df: pd.DataFrame,
 ) -> None:
-    """Kiểm tra tính toàn vẹn và đảm bảo 0 rò rỉ dữ liệu giữa các tập."""
     train_jds = set(train_df["job_id"])
     val_jds = set(val_df["job_id"])
     test_jds = set(test_df["job_id"])
@@ -96,28 +86,35 @@ def save_datasets(
     train_df: pd.DataFrame,
     val_df: pd.DataFrame,
     test_df: pd.DataFrame,
-    raw_dir: str,
-    processed_dir: str,
+    raw_dir: Path,
+    processed_dir: Path,
 ) -> None:
-    """Lưu dữ liệu dưới cả định dạng Parquet và CSV."""
-    os.makedirs(raw_dir, exist_ok=True)
-    os.makedirs(processed_dir, exist_ok=True)
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    processed_dir.mkdir(parents=True, exist_ok=True)
 
-    # Lưu tập raw
-    df_all.to_parquet(os.path.join(raw_dir, "raw_dataset.parquet"), index=False)
-    df_all.to_csv(os.path.join(raw_dir, "raw_dataset.csv"), index=False)
+    df_all.to_parquet(raw_dir / "raw_dataset.parquet", index=False)
+    df_all.to_csv(raw_dir / "raw_dataset.csv", index=False)
 
-    # Lưu tập processed
     for name, split_df in [("train", train_df), ("val", val_df), ("test", test_df)]:
-        split_df.to_parquet(os.path.join(processed_dir, f"{name}.parquet"), index=False)
-        split_df.to_csv(os.path.join(processed_dir, f"{name}.csv"), index=False)
+        split_df.to_parquet(processed_dir / f"{name}.parquet", index=False)
+        split_df.to_csv(processed_dir / f"{name}.csv", index=False)
 
     print(f"Đã lưu thành công vào: {raw_dir} và {processed_dir}")
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Tải và chia dữ liệu CV-JD theo nhóm job_id.")
+    parser.add_argument("--dataset", type=str, default=DEFAULT_DATASET_NAME, help="Tên dataset trên Hugging Face.")
+    parser.add_argument("--train-ratio", type=float, default=DEFAULT_TRAIN_RATIO, help="Tỷ lệ tập Train.")
+    parser.add_argument("--seed", type=int, default=DEFAULT_RANDOM_STATE, help="Random seed.")
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+
     print("1. Tải và gộp dataset từ HuggingFace...")
-    df_all = download_and_combine(DATASET_NAME)
+    df_all = download_and_combine(args.dataset)
 
     print("2. Gán job_id định danh và chuẩn hóa nhãn...")
     df_all = assign_job_ids(df_all)
@@ -125,8 +122,8 @@ def main():
     print("3. Phân chia GroupShuffleSplit theo job_id (70% - 15% - 15%)...")
     train_df, val_df, test_df = split_by_job_group(
         df_all,
-        train_ratio=TRAIN_RATIO,
-        random_state=RANDOM_STATE,
+        train_ratio=args.train_ratio,
+        random_state=args.seed,
     )
 
     print("4. Xác thực rò rỉ dữ liệu...")
@@ -138,4 +135,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
