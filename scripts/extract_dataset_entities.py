@@ -1,12 +1,13 @@
 # Level 1: Thư viện chuẩn Python (Standard Library)
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
 import random
 import sys
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 # Đảm bảo root path nằm trong sys.path trước khi nạp module nội bộ
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -18,152 +19,287 @@ import pandas as pd
 from tqdm import tqdm
 
 # Level 3: Module nội bộ trong dự án (Project-Local Imports)
-from src.data.extractor import extract_jd_entities, extract_cv_entities
+from src.data.extractor import (
+    DEFAULT_NVIDIA_MODEL,
+    extract_jd_entities,
+    extract_cv_entities
+)
 
 
 DEFAULT_INPUT_PATH = "data/processed/train.parquet"
-DEFAULT_OUTPUT_PATH = "data/processed/extracted_sample_25.json"
-DEFAULT_MODEL = "nvidia/nemotron-3.5-super-vl-120b-a12b"
+DEFAULT_OUTPUT_PATH = "data/processed/extracted_dataset.json"
+DEFAULT_JD_CACHE_PATH = "data/processed/jd_cache.json"
+DEFAULT_CV_CACHE_PATH = "data/processed/cv_cache.json"
+DEFAULT_FAILED_PATH = "data/processed/failed_extractions.json"
+DEFAULT_MODEL = DEFAULT_NVIDIA_MODEL
 DEFAULT_SEED = 42
-MAX_RETRIES = 3
-RETRY_DELAY = 2.0
+DEFAULT_CHECKPOINT_EVERY = 5
+RATE_LIMIT_DELAY = 1.0  # NVIDIA xử lý 1.0s mượt mà
 
 
-def extract_with_retry(extract_fn, text: str, model_name: str, max_retries: int = MAX_RETRIES) -> Dict[str, Any]:
-    """Hàm wrapper bọc gọi hàm trích xuất có cơ chế tự động thử lại khi gặp lỗi mạng."""
-    for attempt in range(1, max_retries + 1):
+def compute_text_hash(text: str) -> str:
+    """Tạo mã băm MD5 duy nhất cho một văn bản."""
+    return hashlib.md5(text.strip().encode("utf-8")).hexdigest()
+
+
+def load_json_file(file_path: str, default_val: Any) -> Any:
+    """Nạp file JSON an toàn, trả về giá trị mặc định nếu file chưa tồn tại."""
+    if os.path.exists(file_path):
         try:
-            res = extract_fn(text, model_name=model_name)
-            if res and isinstance(res, dict):
-                return res
+            with open(file_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return default_val
+    return default_val
+
+
+def save_json_file(file_path: str, data: Any) -> None:
+    """Lưu dữ liệu sang file JSON với encoding UTF-8 chuẩn xác."""
+    os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def extract_unique_jds(
+    unique_jds: List[Tuple[str, str]],
+    jd_cache: Dict[str, Any],
+    failed_extractions: Dict[str, Any],
+    model_name: str,
+    jd_cache_path: str,
+    failed_path: str,
+    checkpoint_every: int = DEFAULT_CHECKPOINT_EVERY
+) -> Tuple[int, int]:
+    """Bóc tách thực thể cho toàn bộ các JD duy nhất chưa có trong Cache."""
+    needed_jds = [(j_id, text) for j_id, text in unique_jds if str(j_id) not in jd_cache]
+    print(f"\n[PHASE 1: XỬ LÝ JOB DESCRIPTIONS] Cần bóc tách: {len(needed_jds)} / {len(unique_jds)} JD.")
+
+    success_count = 0
+    fail_count = 0
+
+    for idx, (job_id, jd_text) in enumerate(tqdm(needed_jds, desc="Trích xuất JD"), 1):
+        str_job_id = str(job_id)
+        try:
+            entities = extract_jd_entities(jd_text, model_name=model_name)
+            jd_cache[str_job_id] = entities
+            success_count += 1
+            if str_job_id in failed_extractions.get("jds", {}):
+                del failed_extractions["jds"][str_job_id]
         except Exception as e:
-            if attempt < max_retries:
-                time.sleep(RETRY_DELAY * attempt)
-            else:
-                print(f"\n[Warning] Lỗi trích xuất sau {max_retries} lần thử: {e}")
-    return {}
+            fail_count += 1
+            if "jds" not in failed_extractions:
+                failed_extractions["jds"] = {}
+            failed_extractions["jds"][str_job_id] = {
+                "error": str(e),
+                "timestamp": time.time(),
+                "preview": jd_text[:300]
+            }
+
+        # Nghỉ nhẹ để bảo đảm tốc độ dưới trần TPM của Groq
+        time.sleep(RATE_LIMIT_DELAY)
+
+        if idx % checkpoint_every == 0 or idx == len(needed_jds):
+            save_json_file(jd_cache_path, jd_cache)
+            save_json_file(failed_path, failed_extractions)
+
+    return success_count, fail_count
 
 
-def run_extraction(
+def extract_unique_cvs(
+    unique_cvs: List[str],
+    cv_cache: Dict[str, Any],
+    failed_extractions: Dict[str, Any],
+    model_name: str,
+    cv_cache_path: str,
+    failed_path: str,
+    checkpoint_every: int = DEFAULT_CHECKPOINT_EVERY
+) -> Tuple[int, int]:
+    """Bóc tách thực thể cho toàn bộ các CV duy nhất chưa có trong Cache."""
+    needed_cvs = []
+    for cv_text in unique_cvs:
+        c_hash = compute_text_hash(cv_text)
+        if c_hash not in cv_cache:
+            needed_cvs.append((c_hash, cv_text))
+
+    print(f"\n[PHASE 2: XỬ LÝ RESUMES / CV] Cần bóc tách: {len(needed_cvs)} / {len(unique_cvs)} CV.")
+
+    success_count = 0
+    fail_count = 0
+
+    for idx, (c_hash, cv_text) in enumerate(tqdm(needed_cvs, desc="Trích xuất CV"), 1):
+        t0 = time.time()
+        try:
+            entities = extract_cv_entities(cv_text, model_name=model_name)
+            cv_cache[c_hash] = entities
+            success_count += 1
+            t_cv = time.time() - t0
+            print(f" -> CV {idx}/{len(needed_cvs)} ({c_hash[:8]}): {t_cv:.2f}s | {len(entities.get('skills', []))} skills, {entities.get('total_years_experience', 0)} năm kn")
+            if c_hash in failed_extractions.get("cvs", {}):
+                del failed_extractions["cvs"][c_hash]
+        except Exception as e:
+            fail_count += 1
+            t_cv = time.time() - t0
+            print(f" -> [LỖI] CV {idx}/{len(needed_cvs)} ({c_hash[:8]}): Thất bại sau {t_cv:.2f}s: {e}")
+            if "cvs" not in failed_extractions:
+                failed_extractions["cvs"] = {}
+            failed_extractions["cvs"][c_hash] = {
+                "error": str(e),
+                "timestamp": time.time(),
+                "preview": cv_text[:300]
+            }
+
+        # Nghỉ nhẹ để duy trì kết nối ổn định
+        time.sleep(RATE_LIMIT_DELAY)
+
+        if idx % checkpoint_every == 0 or idx == len(needed_cvs):
+            save_json_file(cv_cache_path, cv_cache)
+            save_json_file(failed_path, failed_extractions)
+
+    return success_count, fail_count
+
+
+def run_pipeline(
     input_path: str,
     output_path: str,
+    jd_cache_path: str = DEFAULT_JD_CACHE_PATH,
+    cv_cache_path: str = DEFAULT_CV_CACHE_PATH,
+    failed_path: str = DEFAULT_FAILED_PATH,
     sample_size: Optional[int] = None,
     seed: int = DEFAULT_SEED,
     model_name: str = DEFAULT_MODEL,
-    checkpoint_every: int = 5
+    all_splits: bool = False
 ) -> None:
-    """Hàm điều phối luồng bóc tách dữ liệu có cache JD và lưu checkpoint liên tục."""
-    print("=" * 70)
-    print("HỆ THỐNG BÓC TÁCH THỰC THỂ CV & JD BẰNG AI (NEMOTRON 120B)")
-    print(f"File nguồn: {input_path}")
-    print(f"Mô hình sử dụng: {model_name}")
-    print("=" * 70)
+    """Hàm điều phối luồng bóc tách dữ liệu kép (Double Cache) và ghép nối dataset."""
+    print("=" * 75)
+    print("HỆ THỐNG BÓC TÁCH THỰC THỂ CV & JD BẰNG AI (NVIDIA NEMOTRON 120B)")
+    print(f"Mô hình sử dụng : {model_name}")
+    print(f"File nguồn dữ liệu: {input_path}")
+    print(f"Bộ nhớ Cache JD : {jd_cache_path}")
+    print(f"Bộ nhớ Cache CV : {cv_cache_path}")
+    print(f"File lưu lỗi riêng: {failed_path}")
+    print("=" * 75)
 
     # 1. Nạp dữ liệu
-    df = pd.read_parquet(input_path)
-    print(f"Tổng số mẫu trong tập dữ liệu: {len(df):,}")
+    if all_splits:
+        dir_name = os.path.dirname(input_path)
+        splits = []
+        for s_name in ["train.parquet", "val.parquet", "test.parquet"]:
+            s_path = os.path.join(dir_name, s_name)
+            if os.path.exists(s_path):
+                splits.append(pd.read_parquet(s_path))
+        df = pd.concat(splits, ignore_index=True) if splits else pd.read_parquet(input_path)
+        print(f">>> Đã nạp gộp toàn bộ 3 tập train, val, test: {len(df):,} cặp mẫu.")
+    else:
+        df = pd.read_parquet(input_path)
+        print(f">>> Đã nạp tập dữ liệu: {len(df):,} cặp mẫu.")
 
+    # Nếu có chế độ sample để kiểm thử nhanh
     if sample_size and sample_size < len(df):
         random.seed(seed)
         df = df.sample(n=sample_size, random_state=seed).reset_index(drop=True)
-        print(f">>> Đã chọn ngẫu nhiên {sample_size} mẫu để kiểm thử (Seed={seed}).")
+        print(f">>> [CHẾ ĐỘ TEST] Đang lấy ngẫu nhiên {sample_size} cặp mẫu để kiểm chứng (Seed={seed}).")
     else:
         df = df.reset_index(drop=True)
 
-    # 2. Quản lý Checkpoint & JD Cache
-    records: List[Dict[str, Any]] = []
-    jd_cache: Dict[str, Dict[str, Any]] = {}
-    completed_indices = set()
+    # 2. Nạp Cache hiện có
+    jd_cache: Dict[str, Any] = load_json_file(jd_cache_path, {})
+    cv_cache: Dict[str, Any] = load_json_file(cv_cache_path, {})
+    failed_extractions: Dict[str, Any] = load_json_file(failed_path, {"jds": {}, "cvs": {}})
 
-    if os.path.exists(output_path):
-        try:
-            with open(output_path, "r", encoding="utf-8") as f:
-                saved_data = json.load(f)
-                records = saved_data.get("records", [])
-                jd_cache = saved_data.get("jd_cache", {})
-                completed_indices = {r["sample_idx"] for r in records}
-                print(f">>> Tìm thấy checkpoint! Đã hoàn thành {len(records)} mẫu trước đó. Tiếp tục chạy...")
-        except Exception as e:
-            print(f">>> Không thể nạp checkpoint ({e}), bắt đầu chạy mới.")
+    print(f">>> Trạng thái Cache: Đã có {len(jd_cache)} JDs và {len(cv_cache)} CVs được bóc tách.")
+    print(f">>> Trạng thái Lỗi : {len(failed_extractions.get('jds', {}))} JDs lỗi, {len(failed_extractions.get('cvs', {}))} CVs lỗi.")
 
-    # 3. Vòng lặp bóc tách chính
-    print(f"\nBắt đầu xử lý {len(df)} mẫu...")
+    # 3. Gom danh sách duy nhất
+    unique_jds_df = df[["job_id", "job_description_text"]].drop_duplicates(subset=["job_id"])
+    unique_jds = [(str(row["job_id"]), row["job_description_text"]) for _, row in unique_jds_df.iterrows()]
+    unique_cvs = list(df["resume_text"].drop_duplicates())
+
     start_time = time.time()
 
-    for idx, row in tqdm(df.iterrows(), total=len(df), desc="Tiến trình bóc tách"):
-        if idx in completed_indices:
-            continue
+    # 4. Phase 1: Bóc tách JD duy nhất
+    jd_succ, jd_fail = extract_unique_jds(
+        unique_jds, jd_cache, failed_extractions, model_name, jd_cache_path, failed_path
+    )
 
-        job_id = row["job_id"]
-        jd_text = row["job_description_text"]
-        cv_text = row["resume_text"]
-        label = int(row["label"])
-        label_text = row["label_text"]
+    # 5. Phase 2: Bóc tách CV duy nhất
+    cv_succ, cv_fail = extract_unique_cvs(
+        unique_cvs, cv_cache, failed_extractions, model_name, cv_cache_path, failed_path
+    )
 
-        # 3.1 Bóc tách JD (Có Cache theo job_id)
-        if job_id not in jd_cache:
-            jd_entities = extract_with_retry(extract_jd_entities, jd_text, model_name)
-            jd_cache[job_id] = jd_entities
-        else:
-            jd_entities = jd_cache[job_id]
+    # 6. Phase 3: Ánh xạ kết quả ghép thành dataset hoàn chỉnh
+    print(f"\n[PHASE 3: ÁNH XẠ KẾT QUẢ VÀO {len(df)} BẢN GHI DATASET]")
+    dataset_records: List[Dict[str, Any]] = []
+    missing_count = 0
 
-        # 3.2 Bóc tách CV
-        cv_entities = extract_with_retry(extract_cv_entities, cv_text, model_name)
+    for idx, row in df.iterrows():
+        job_id_str = str(row["job_id"])
+        c_hash = compute_text_hash(row["resume_text"])
 
-        # 3.3 Lưu trữ record
+        extracted_jd = jd_cache.get(job_id_str)
+        extracted_cv = cv_cache.get(c_hash)
+
+        is_complete = bool(extracted_jd and extracted_cv)
+        if not is_complete:
+            missing_count += 1
+
         record = {
             "sample_idx": idx,
-            "job_id": job_id,
-            "label": label,
-            "label_text": label_text,
-            "jd_entities": jd_entities,
-            "cv_entities": cv_entities,
-            "jd_text_preview": jd_text[:300] + "..." if len(jd_text) > 300 else jd_text,
-            "cv_text_preview": cv_text[:300] + "..." if len(cv_text) > 300 else cv_text,
+            "job_id": row["job_id"],
+            "label": int(row["label"]),
+            "label_text": row["label_text"],
+            "jd_entities": extracted_jd,
+            "cv_entities": extracted_cv,
+            "is_complete": is_complete
         }
-        records.append(record)
-        completed_indices.add(idx)
+        dataset_records.append(record)
 
-        # 3.4 Lưu Checkpoint định kỳ
-        if len(records) % checkpoint_every == 0 or len(records) == len(df):
-            checkpoint_payload = {
-                "total_completed": len(records),
-                "model": model_name,
-                "jd_cache": jd_cache,
-                "records": records
-            }
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            with open(output_path, "w", encoding="utf-8") as f:
-                json.dump(checkpoint_payload, f, ensure_ascii=False, indent=2)
+    # 7. Lưu file kết quả dataset hoàn chỉnh
+    output_payload = {
+        "total_records": len(dataset_records),
+        "complete_records": len(dataset_records) - missing_count,
+        "missing_records": missing_count,
+        "unique_jds_total": len(unique_jds),
+        "unique_cvs_total": len(unique_cvs),
+        "model_used": model_name,
+        "records": dataset_records
+    }
+    save_json_file(output_path, output_payload)
 
     elapsed = time.time() - start_time
-    print("\n" + "=" * 70)
-    print("HOÀN THÀNH BÓC TÁCH THÀNH CÔNG!")
-    print(f"- Tổng số mẫu đã xử lý: {len(records)}")
-    print(f"- Số JD duy nhất được bóc tách: {len(jd_cache)}")
-    print(f"- Tổng thời gian: {elapsed:.2f}s (Trung bình: {elapsed / max(len(records), 1):.2f}s/mẫu)")
-    print(f"- File lưu kết quả: {output_path}")
-    print("=" * 70)
+    print("\n" + "=" * 75)
+    print("BÁO CÁO TỔNG KẾT TIẾN TRÌNH:")
+    print(f"- Tổng thời gian xử lý: {elapsed:.2f}s")
+    print(f"- Tổng số JD duy nhất trong cache : {len(jd_cache)} (Mới bóc tách: {jd_succ}, Thất bại: {jd_fail})")
+    print(f"- Tổng số CV duy nhất trong cache : {len(cv_cache)} (Mới bóc tách: {cv_succ}, Thất bại: {cv_fail})")
+    print(f"- Số bản ghi hoàn thiện 100%      : {len(dataset_records) - missing_count} / {len(dataset_records)}")
+    print(f"- File Dataset hoàn chỉnh         : {output_path}")
+    print(f"- File Ghi nhận Lỗi riêng         : {failed_path}")
+    print("=" * 75)
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Kịch bản bóc tách thực thể CV/JD bằng AI Nemotron 120B.")
+    parser = argparse.ArgumentParser(description="Hệ thống bóc tách thực thể CV/JD bằng AI (NVIDIA Nemotron 120B).")
     parser.add_argument("--input", type=str, default=DEFAULT_INPUT_PATH, help="Đường dẫn file parquet đầu vào.")
     parser.add_argument("--output", type=str, default=DEFAULT_OUTPUT_PATH, help="Đường dẫn file JSON đầu ra.")
-    parser.add_argument("--sample", type=int, default=25, help="Số lượng mẫu ngẫu nhiên để test (mặc định: 25).")
+    parser.add_argument("--jd-cache", type=str, default=DEFAULT_JD_CACHE_PATH, help="Đường dẫn lưu cache JD.")
+    parser.add_argument("--cv-cache", type=str, default=DEFAULT_CV_CACHE_PATH, help="Đường dẫn lưu cache CV.")
+    parser.add_argument("--failed-file", type=str, default=DEFAULT_FAILED_PATH, help="Đường dẫn lưu các mẫu lỗi.")
+    parser.add_argument("--sample", type=int, default=None, help="Số lượng mẫu test (để None nếu chạy full).")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help="Random seed chọn mẫu ngẫu nhiên.")
-    parser.add_argument("--model", type=str, default=DEFAULT_MODEL, help="Tên model NVIDIA.")
-    parser.add_argument("--checkpoint-every", type=int, default=5, help="Số mẫu mỗi lần lưu checkpoint.")
+    parser.add_argument("--model", type=str, default=DEFAULT_MODEL, help="Tên model NVIDIA hoặc Groq.")
+    parser.add_argument("--all-splits", action="store_true", help="Gộp cả 3 tập train, val, test để bóc tách toàn diện.")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    run_extraction(
+    run_pipeline(
         input_path=args.input,
         output_path=args.output,
+        jd_cache_path=args.jd_cache,
+        cv_cache_path=args.cv_cache,
+        failed_path=args.failed_file,
         sample_size=args.sample,
         seed=args.seed,
         model_name=args.model,
-        checkpoint_every=args.checkpoint_every
+        all_splits=args.all_splits
     )
