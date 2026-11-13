@@ -1,15 +1,14 @@
-# Level 1: Thư viện chuẩn Python (Standard Library)
 import json
+import os
 import sys
 
-# Level 2: Thư viện bên thứ ba (Third-party Packages)
+from dotenv import load_dotenv
 import requests
 
-# Level 3: Module nội bộ trong dự án (Project-Local Imports)
-
+load_dotenv()
 
 API_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-API_KEY = "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"
+API_KEY = os.getenv("NVIDIA_API_KEY", os.getenv("API_NVIDIA", ""))
 MODEL_NAME = "deepseek-ai/deepseek-v4.1-flash"
 
 
