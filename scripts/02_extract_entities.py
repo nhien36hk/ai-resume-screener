@@ -19,22 +19,19 @@ import pandas as pd
 from tqdm import tqdm
 
 # Level 3: Module nội bộ trong dự án (Project-Local Imports)
-from src.data.extractor import (
+from src.config import (
+    CV_CACHE_PATH,
     DEFAULT_NVIDIA_MODEL,
-    extract_jd_entities,
-    extract_cv_entities
+    DEFAULT_RANDOM_STATE,
+    EXTRACTED_DATASET_PATH,
+    FAILED_EXTRACTIONS_PATH,
+    JD_CACHE_PATH,
+    PROCESSED_DIR,
 )
-
-
-DEFAULT_INPUT_PATH = "data/processed/train.parquet"
-DEFAULT_OUTPUT_PATH = "data/processed/extracted_dataset.json"
-DEFAULT_JD_CACHE_PATH = "data/processed/jd_cache.json"
-DEFAULT_CV_CACHE_PATH = "data/processed/cv_cache.json"
-DEFAULT_FAILED_PATH = "data/processed/failed_extractions.json"
-DEFAULT_MODEL = DEFAULT_NVIDIA_MODEL
-DEFAULT_SEED = 42
-DEFAULT_CHECKPOINT_EVERY = 5
-RATE_LIMIT_DELAY = 1.0  # NVIDIA xử lý 1.0s mượt mà
+from src.data.extractor import (
+    extract_cv_entities,
+    extract_jd_entities,
+)
 
 
 def compute_text_hash(text: str) -> str:
@@ -67,7 +64,8 @@ def extract_unique_jds(
     model_name: str,
     jd_cache_path: str,
     failed_path: str,
-    checkpoint_every: int = DEFAULT_CHECKPOINT_EVERY
+    checkpoint_every: int = 5,
+    rate_limit_delay: float = 1.0
 ) -> Tuple[int, int]:
     """Bóc tách thực thể cho toàn bộ các JD duy nhất chưa có trong Cache."""
     needed_jds = [(j_id, text) for j_id, text in unique_jds if str(j_id) not in jd_cache]
@@ -111,7 +109,8 @@ def extract_unique_cvs(
     model_name: str,
     cv_cache_path: str,
     failed_path: str,
-    checkpoint_every: int = DEFAULT_CHECKPOINT_EVERY
+    checkpoint_every: int = 5,
+    rate_limit_delay: float = 1.0
 ) -> Tuple[int, int]:
     """Bóc tách thực thể cho toàn bộ các CV duy nhất chưa có trong Cache."""
     needed_cvs = []
@@ -160,12 +159,12 @@ def extract_unique_cvs(
 def run_pipeline(
     input_path: str,
     output_path: str,
-    jd_cache_path: str = DEFAULT_JD_CACHE_PATH,
-    cv_cache_path: str = DEFAULT_CV_CACHE_PATH,
-    failed_path: str = DEFAULT_FAILED_PATH,
+    jd_cache_path: str = str(JD_CACHE_PATH),
+    cv_cache_path: str = str(CV_CACHE_PATH),
+    failed_path: str = str(FAILED_EXTRACTIONS_PATH),
     sample_size: Optional[int] = None,
-    seed: int = DEFAULT_SEED,
-    model_name: str = DEFAULT_MODEL,
+    seed: int = DEFAULT_RANDOM_STATE,
+    model_name: str = DEFAULT_NVIDIA_MODEL,
     all_splits: bool = False
 ) -> None:
     """Hàm điều phối luồng bóc tách dữ liệu kép (Double Cache) và ghép nối dataset."""
@@ -278,14 +277,14 @@ def run_pipeline(
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Hệ thống bóc tách thực thể CV/JD bằng AI (NVIDIA Nemotron 120B).")
-    parser.add_argument("--input", type=str, default=DEFAULT_INPUT_PATH, help="Đường dẫn file parquet đầu vào.")
-    parser.add_argument("--output", type=str, default=DEFAULT_OUTPUT_PATH, help="Đường dẫn file JSON đầu ra.")
-    parser.add_argument("--jd-cache", type=str, default=DEFAULT_JD_CACHE_PATH, help="Đường dẫn lưu cache JD.")
-    parser.add_argument("--cv-cache", type=str, default=DEFAULT_CV_CACHE_PATH, help="Đường dẫn lưu cache CV.")
-    parser.add_argument("--failed-file", type=str, default=DEFAULT_FAILED_PATH, help="Đường dẫn lưu các mẫu lỗi.")
+    parser.add_argument("--input", type=str, default=str(PROCESSED_DIR / "train.parquet"), help="Đường dẫn file parquet đầu vào.")
+    parser.add_argument("--output", type=str, default=str(EXTRACTED_DATASET_PATH), help="Đường dẫn file JSON đầu ra.")
+    parser.add_argument("--jd-cache", type=str, default=str(JD_CACHE_PATH), help="Đường dẫn lưu cache JD.")
+    parser.add_argument("--cv-cache", type=str, default=str(CV_CACHE_PATH), help="Đường dẫn lưu cache CV.")
+    parser.add_argument("--failed-file", type=str, default=str(FAILED_EXTRACTIONS_PATH), help="Đường dẫn lưu các mẫu lỗi.")
     parser.add_argument("--sample", type=int, default=None, help="Số lượng mẫu test (để None nếu chạy full).")
-    parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help="Random seed chọn mẫu ngẫu nhiên.")
-    parser.add_argument("--model", type=str, default=DEFAULT_MODEL, help="Tên model NVIDIA hoặc Groq.")
+    parser.add_argument("--seed", type=int, default=DEFAULT_RANDOM_STATE, help="Random seed chọn mẫu ngẫu nhiên.")
+    parser.add_argument("--model", type=str, default=DEFAULT_NVIDIA_MODEL, help="Tên model NVIDIA hoặc Groq.")
     parser.add_argument("--all-splits", action="store_true", help="Gộp cả 3 tập train, val, test để bóc tách toàn diện.")
     return parser.parse_args()
 

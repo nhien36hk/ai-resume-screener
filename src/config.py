@@ -8,6 +8,7 @@ PROCESSED_DIR = DATA_DIR / "processed"
 
 JD_CACHE_PATH = PROCESSED_DIR / "jd_cache.json"
 CV_CACHE_PATH = PROCESSED_DIR / "cv_cache.json"
+FAILED_EXTRACTIONS_PATH = PROCESSED_DIR / "failed_extractions.json"
 EXTRACTED_DATASET_PATH = PROCESSED_DIR / "extracted_dataset.json"
 
 # Domain Constants
@@ -59,6 +60,7 @@ CV_HEADERS = [
 # Defaults
 DEFAULT_DATASET_NAME = "cnamuangtoun/resume-job-description-fit"
 DEFAULT_VLLM_MODEL = "Qwen/Qwen3-14B-FP8"
+DEFAULT_NVIDIA_MODEL = "nvidia/nemotron-3.5-super-vl-120b-a12b"
 DEFAULT_RANDOM_STATE = 42
 DEFAULT_TRAIN_RATIO = 0.70
 DEFAULT_VAL_RATIO = 0.15
