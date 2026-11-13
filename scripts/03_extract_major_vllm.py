@@ -1,8 +1,6 @@
 import argparse
-import hashlib
 import json
 from pathlib import Path
-import re
 import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -17,59 +15,13 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.config import (
     CV_CACHE_PATH,
-    CV_HEADERS,
     DEFAULT_VLLM_MODEL,
     JD_CACHE_PATH,
     MAJOR_GROUPS,
     PROCESSED_DIR,
 )
-
-H_PATTERN = "|".join(sorted(map(re.escape, CV_HEADERS), key=len, reverse=True))
-HEADER_RE = re.compile(rf"(?<![A-Za-z])({H_PATTERN})(?=[A-Z0-9:\s-])")
-SENT_RE = re.compile(r"(?<=[.!?;])\s+(?=[A-Z])|\s+[-•●▪]\s*(?=[A-Z])")
-MAX_SEGMENT_WORDS = 30
-
-
-def segment_text(text: str) -> List[str]:
-    text = HEADER_RE.sub(r"\n\1\n", text)
-    segs = []
-    for line in text.split("\n"):
-        line = line.strip()
-        if not line:
-            continue
-        for s in SENT_RE.split(line):
-            s = s.strip()
-            if not s:
-                continue
-            words = s.split()
-            for i in range(0, len(words), MAX_SEGMENT_WORDS):
-                chunk = " ".join(words[i:i + MAX_SEGMENT_WORDS])
-                if chunk:
-                    segs.append(chunk)
-    return segs
-
-
-def number_segments(text: str) -> Tuple[str, List[str]]:
-    segs = segment_text(text)
-    numbered_lines = [f"[{i}] {s}" for i, s in enumerate(segs, 1)]
-    return "\n".join(numbered_lines), segs
-
-
-def compute_text_hash(text: str) -> str:
-    return hashlib.md5(text.strip().encode("utf-8")).hexdigest()
-
-
-def load_json(path: Path) -> Any:
-    if path.exists():
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
-
-
-def save_json(path: Path, data: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+from src.features.text import number_segments
+from src.utils import compute_text_hash, load_json, save_json
 
 
 CV_MAJOR_SCHEMA = {

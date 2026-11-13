@@ -1,7 +1,5 @@
 # Level 1: Thư viện chuẩn Python (Standard Library)
 import argparse
-import hashlib
-import json
 import os
 from pathlib import Path
 import random
@@ -32,29 +30,7 @@ from src.data.extractor import (
     extract_cv_entities,
     extract_jd_entities,
 )
-
-
-def compute_text_hash(text: str) -> str:
-    """Tạo mã băm MD5 duy nhất cho một văn bản."""
-    return hashlib.md5(text.strip().encode("utf-8")).hexdigest()
-
-
-def load_json_file(file_path: str, default_val: Any) -> Any:
-    """Nạp file JSON an toàn, trả về giá trị mặc định nếu file chưa tồn tại."""
-    if os.path.exists(file_path):
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return default_val
-    return default_val
-
-
-def save_json_file(file_path: str, data: Any) -> None:
-    """Lưu dữ liệu sang file JSON với encoding UTF-8 chuẩn xác."""
-    os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
-    with open(file_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+from src.utils import compute_text_hash, load_json, save_json
 
 
 def extract_unique_jds(
@@ -96,8 +72,8 @@ def extract_unique_jds(
         time.sleep(RATE_LIMIT_DELAY)
 
         if idx % checkpoint_every == 0 or idx == len(needed_jds):
-            save_json_file(jd_cache_path, jd_cache)
-            save_json_file(failed_path, failed_extractions)
+            save_json(jd_cache_path, jd_cache)
+            save_json(failed_path, failed_extractions)
 
     return success_count, fail_count
 
@@ -150,8 +126,8 @@ def extract_unique_cvs(
         time.sleep(RATE_LIMIT_DELAY)
 
         if idx % checkpoint_every == 0 or idx == len(needed_cvs):
-            save_json_file(cv_cache_path, cv_cache)
-            save_json_file(failed_path, failed_extractions)
+            save_json(cv_cache_path, cv_cache)
+            save_json(failed_path, failed_extractions)
 
     return success_count, fail_count
 
@@ -200,9 +176,9 @@ def run_pipeline(
         df = df.reset_index(drop=True)
 
     # 2. Nạp Cache hiện có
-    jd_cache: Dict[str, Any] = load_json_file(jd_cache_path, {})
-    cv_cache: Dict[str, Any] = load_json_file(cv_cache_path, {})
-    failed_extractions: Dict[str, Any] = load_json_file(failed_path, {"jds": {}, "cvs": {}})
+    jd_cache: Dict[str, Any] = load_json(jd_cache_path, {})
+    cv_cache: Dict[str, Any] = load_json(cv_cache_path, {})
+    failed_extractions: Dict[str, Any] = load_json(failed_path, {"jds": {}, "cvs": {}})
 
     print(f">>> Trạng thái Cache: Đã có {len(jd_cache)} JDs và {len(cv_cache)} CVs được bóc tách.")
     print(f">>> Trạng thái Lỗi : {len(failed_extractions.get('jds', {}))} JDs lỗi, {len(failed_extractions.get('cvs', {}))} CVs lỗi.")
@@ -261,7 +237,7 @@ def run_pipeline(
         "model_used": model_name,
         "records": dataset_records
     }
-    save_json_file(output_path, output_payload)
+    save_json(output_path, output_payload)
 
     elapsed = time.time() - start_time
     print("\n" + "=" * 75)
