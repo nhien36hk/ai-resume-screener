@@ -192,14 +192,16 @@ def run_vllm_batch(
     needed_jds = []
     for _, row in unique_jds_df.iterrows():
         j_id = str(row["job_id"])
-        if j_id not in jd_cache or "major_group" not in jd_cache[j_id]:
+        has_entities = j_id in jd_cache and "min_degree" in jd_cache[j_id]
+        if has_entities and "major_group" not in jd_cache[j_id]:
             needed_jds.append((j_id, row["job_description_text"]))
 
     unique_cvs_series = df_all["resume_text"].drop_duplicates()
     needed_cvs = []
     for cv_text in unique_cvs_series:
         c_hash = compute_text_hash(cv_text)
-        if c_hash not in cv_cache or "major_group" not in cv_cache[c_hash]:
+        has_entities = c_hash in cv_cache and "skills" in cv_cache[c_hash]
+        if has_entities and "major_group" not in cv_cache[c_hash]:
             needed_cvs.append((c_hash, cv_text))
 
     print("=" * 70)

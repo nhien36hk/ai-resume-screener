@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 import sys
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -19,6 +19,20 @@ from src.config import (
 )
 from src.data.loader import get_split_path
 from src.utils import compute_text_hash, load_json, to_markdown_table
+
+
+def is_valid_jd_entities(ent: Optional[Dict[str, Any]]) -> bool:
+    if not ent or not isinstance(ent, dict):
+        return False
+    required_keys = ["must_have_skills", "min_years_experience", "min_degree"]
+    return all(k in ent for k in required_keys)
+
+
+def is_valid_cv_entities(ent: Optional[Dict[str, Any]]) -> bool:
+    if not ent or not isinstance(ent, dict):
+        return False
+    required_keys = ["skills", "total_years_experience", "highest_degree"]
+    return all(k in ent for k in required_keys)
 
 
 def process_split(
@@ -48,11 +62,14 @@ def process_split(
         jd_ent = jd_cache.get(job_id)
         cv_ent = cv_cache.get(c_hash)
 
-        if jd_ent is None or cv_ent is None:
+        has_valid_jd = is_valid_jd_entities(jd_ent)
+        has_valid_cv = is_valid_cv_entities(cv_ent)
+
+        if not has_valid_jd or not has_valid_cv:
             dropped_count += 1
-            if jd_ent is None:
+            if not has_valid_jd:
                 missing_jd_count += 1
-            if cv_ent is None:
+            if not has_valid_cv:
                 missing_cv_count += 1
             continue
 
