@@ -1,13 +1,29 @@
 import argparse
 import json
+import multiprocessing
+import os
 from pathlib import Path
 import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+os.environ.setdefault("VLLM_USE_DEEP_GEMM", "0")
+os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
+os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+
+try:
+    multiprocessing.set_start_method("spawn", force=True)
+except RuntimeError:
+    pass
+
 import pandas as pd
 from vllm import LLM, SamplingParams
-from vllm.sampling_params import GuidedDecodingParams
+try:
+    from vllm.sampling_params import GuidedDecodingParams
+    GUIDED_ARG = "guided_decoding"
+except ImportError:
+    from vllm.sampling_params import StructuredOutputsParams as GuidedDecodingParams
+    GUIDED_ARG = "structured_outputs"
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -40,7 +56,7 @@ JD_MAJOR_SCHEMA = {
         "evidence_ids": {"type": "array", "items": {"type": "integer"}, "maxItems": 3},
         "required_majors": {"type": "array", "items": {"type": "string"}},
         "major_group": {"type": "string", "enum": MAJOR_GROUPS},
-        "accepts_related_field": {"type": "bool"}
+        "accepts_related_field": {"type": "boolean"}
     },
     "required": ["evidence_ids", "required_majors", "major_group", "accepts_related_field"]
 }
@@ -205,7 +221,7 @@ def run_vllm_batch(
     llm = LLM(
         model=model_name,
         max_model_len=8192,
-        gpu_memory_utilization=0.92,
+        gpu_memory_utilization=0.88,
         kv_cache_dtype="fp8",
         enable_prefix_caching=True,
         seed=42,
@@ -224,7 +240,7 @@ def run_vllm_batch(
         jd_params = SamplingParams(
             temperature=0.0,
             max_tokens=150,
-            guided_decoding=GuidedDecodingParams(json=JD_MAJOR_SCHEMA)
+            **{GUIDED_ARG: GuidedDecodingParams(json=JD_MAJOR_SCHEMA)}
         )
 
         t0 = time.time()
@@ -272,7 +288,7 @@ def run_vllm_batch(
         cv_params = SamplingParams(
             temperature=0.0,
             max_tokens=150,
-            guided_decoding=GuidedDecodingParams(json=CV_MAJOR_SCHEMA)
+            **{GUIDED_ARG: GuidedDecodingParams(json=CV_MAJOR_SCHEMA)}
         )
 
         t0 = time.time()
@@ -315,7 +331,8 @@ def run_vllm_batch(
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Trích xuất major cho CV/JD bằng vLLM (Qwen3-14B-FP8).")
-    parser.add_argument("--model", type=str, default=DEFAULT_VLLM_MODEL, help="Tên model Qwen FP8.")
+    default_model = "/tmp/Qwen3-14B-FP8" if Path("/tmp/Qwen3-14B-FP8").exists() else DEFAULT_VLLM_MODEL
+    parser.add_argument("--model", type=str, default=default_model, help="Tên hoặc đường dẫn model Qwen FP8.")
     parser.add_argument("--jd-cache", type=Path, default=JD_CACHE_PATH, help="Đường dẫn file cache JD.")
     parser.add_argument("--cv-cache", type=Path, default=CV_CACHE_PATH, help="Đường dẫn file cache CV.")
     parser.add_argument("--test-sample", type=int, default=None, help="Chạy thử nghiệm một số lượng mẫu nhỏ (VD: 20).")
