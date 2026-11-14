@@ -47,12 +47,12 @@ class JDEntities(BaseModel):
 
 class CVEntities(BaseModel):
     candidate_title: str
-    skills: StrList = Field(max_length=40)
+    skills: StrList = Field(max_length=128)  # 120B cache: p90=60, max=125 skills per CV
     total_years_experience: Years
-    certs: StrList = Field(max_length=10)
+    certs: StrList = Field(max_length=20)
     education_evidence_ids: list[int] = Field(max_length=3)
     highest_degree: Degree
-    majors: StrList = Field(max_length=5)
+    majors: StrList = Field(max_length=10)
     major_group: MajorGroup
 
 
