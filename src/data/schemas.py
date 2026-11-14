@@ -1,177 +1,73 @@
+"""Pydantic schemas: the single source for the LLM output format and for cache validation."""
 import re
-from typing import Any, Dict, List, Literal, Union
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, BeforeValidator, Field, ValidationError
 
 from src.config import DEGREE_LEVELS, MAJOR_GROUPS
 
 SCHEMA_VERSION = 2
 
-DegreeType = Literal["none", "high_school", "associate", "bachelor", "master", "phd"]
-
-MajorGroupType = Literal[
-    "computer_science",
-    "information_technology",
-    "software_engineering",
-    "data_science_ai",
-    "electrical_electronics",
-    "mechanical_engineering",
-    "civil_construction",
-    "accounting_finance",
-    "business_administration",
-    "marketing_communications",
-    "human_resources",
-    "economics",
-    "healthcare_medical",
-    "biology_biotechnology",
-    "chemistry_chemical_engineering",
-    "physics_materials_science",
-    "mathematics_statistics",
-    "law_legal",
-    "languages_linguistics",
-    "graphic_design_multimedia",
-    "supply_chain_logistics",
-    "hospitality_tourism",
-    "education_pedagogy",
-    "environmental_science",
-    "general_engineering",
-    "other",
-    "unknown",
-]
+Degree = Literal[tuple(DEGREE_LEVELS)]
+MajorGroup = Literal[tuple(MAJOR_GROUPS)]
 
 
-def _clean_str_list(items: Any) -> List[str]:
-    if not isinstance(items, list):
-        return []
-    seen = set()
-    cleaned_items: List[str] = []
-    for item in items:
-        if not isinstance(item, str):
-            continue
-        cleaned = item.lower().strip()
-        if cleaned and cleaned not in seen:
-            seen.add(cleaned)
-            cleaned_items.append(cleaned)
-    return cleaned_items
+def _str_list(v: Any) -> list[str]:
+    if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+        raise ValueError("expected a list of strings")
+    return list(dict.fromkeys(x.strip().lower() for x in v if x.strip()))
 
 
-def _clean_cert_list(items: Any) -> List[str]:
-    if not isinstance(items, list):
-        return []
-    seen = set()
-    cleaned_items: List[str] = []
-    for item in items:
-        if not isinstance(item, str):
-            continue
-        cleaned = item.strip()
-        if cleaned and cleaned.lower() not in seen:
-            seen.add(cleaned.lower())
-            cleaned_items.append(cleaned)
-    return cleaned_items
+def _years(v: Any) -> float:
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return float(v)
+    match = re.match(r"\s*(\d+(?:\.\d+)?)", v) if isinstance(v, str) else None
+    if not match:
+        raise ValueError("expected a number of years")
+    return float(match.group(1))  # "3-5 years" -> 3.0 (lower bound)
 
 
-def _clean_years(val: Any) -> float:
-    if val is None:
-        return 0.0
-    if isinstance(val, (int, float)):
-        return max(0.0, float(val))
-    if isinstance(val, str):
-        match = re.search(r"(\d+(?:\.\d+)?)", val)
-        if match:
-            return float(match.group(1))
-    return 0.0
+StrList = Annotated[list[str], BeforeValidator(_str_list)]
+Years = Annotated[float, Field(ge=0), BeforeValidator(_years)]  # Field first, or the schema emits "ge" instead of "minimum"
 
 
+# Field order matters: the model writes left to right, so evidence comes before the conclusions drawn from it.
 class JDEntities(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
     job_title: str
-    must_have_skills: List[str] = Field(default_factory=list, max_length=40)
-    nice_to_have_skills: List[str] = Field(default_factory=list, max_length=40)
-    min_years_experience: float = Field(default=0.0, ge=0.0)
-    min_degree: DegreeType = "none"
-    required_certs: List[str] = Field(default_factory=list, max_length=10)
-    education_evidence_ids: List[int] = Field(default_factory=list, max_length=3)
-    required_majors: List[str] = Field(default_factory=list, max_length=5)
-    major_group: MajorGroupType = "unknown"
-    accepts_related_field: bool = False
-
-    @field_validator("must_have_skills", "nice_to_have_skills", "required_majors", mode="before")
-    @classmethod
-    def normalize_str_lists(cls, v: Any) -> List[str]:
-        return _clean_str_list(v)
-
-    @field_validator("required_certs", mode="before")
-    @classmethod
-    def normalize_certs(cls, v: Any) -> List[str]:
-        return _clean_cert_list(v)
-
-    @field_validator("min_years_experience", mode="before")
-    @classmethod
-    def normalize_years(cls, v: Any) -> float:
-        return _clean_years(v)
-
-    @field_validator("min_degree", mode="before")
-    @classmethod
-    def normalize_degree(cls, v: Any) -> Any:
-        if isinstance(v, str):
-            return v.lower().strip()
-        return v
-
-    @field_validator("major_group", mode="before")
-    @classmethod
-    def normalize_major_group(cls, v: Any) -> Any:
-        if isinstance(v, str):
-            return v.lower().strip()
-        return v
+    must_have_skills: StrList = Field(max_length=40)
+    nice_to_have_skills: StrList = Field(max_length=40)
+    min_years_experience: Years
+    required_certs: StrList = Field(max_length=10)
+    education_evidence_ids: list[int] = Field(max_length=3)
+    min_degree: Degree
+    required_majors: StrList = Field(max_length=5)
+    major_group: MajorGroup
+    accepts_related_field: bool
 
 
 class CVEntities(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
     candidate_title: str
-    skills: List[str] = Field(default_factory=list, max_length=40)
-    total_years_experience: float = Field(default=0.0, ge=0.0)
-    highest_degree: DegreeType = "none"
-    certs: List[str] = Field(default_factory=list, max_length=10)
-    education_evidence_ids: List[int] = Field(default_factory=list, max_length=3)
-    majors: List[str] = Field(default_factory=list, max_length=5)
-    major_group: MajorGroupType = "unknown"
-
-    @field_validator("skills", "majors", mode="before")
-    @classmethod
-    def normalize_str_lists(cls, v: Any) -> List[str]:
-        return _clean_str_list(v)
-
-    @field_validator("certs", mode="before")
-    @classmethod
-    def normalize_certs(cls, v: Any) -> List[str]:
-        return _clean_cert_list(v)
-
-    @field_validator("total_years_experience", mode="before")
-    @classmethod
-    def normalize_years(cls, v: Any) -> float:
-        return _clean_years(v)
-
-    @field_validator("highest_degree", mode="before")
-    @classmethod
-    def normalize_degree(cls, v: Any) -> Any:
-        if isinstance(v, str):
-            return v.lower().strip()
-        return v
-
-    @field_validator("major_group", mode="before")
-    @classmethod
-    def normalize_major_group(cls, v: Any) -> Any:
-        if isinstance(v, str):
-            return v.lower().strip()
-        return v
+    skills: StrList = Field(max_length=40)
+    total_years_experience: Years
+    certs: StrList = Field(max_length=10)
+    education_evidence_ids: list[int] = Field(max_length=3)
+    highest_degree: Degree
+    majors: StrList = Field(max_length=5)
+    major_group: MajorGroup
 
 
-def get_jd_json_schema() -> Dict[str, Any]:
-    return JDEntities.model_json_schema()
+def json_schema(model_cls: type[BaseModel]) -> dict:
+    schema = model_cls.model_json_schema()
+    schema["additionalProperties"] = False  # strict structured output requires it
+    return schema
 
 
-def get_cv_json_schema() -> Dict[str, Any]:
-    return CVEntities.model_json_schema()
-
+def is_current(model_cls: type[BaseModel], entry: Any) -> bool:
+    """True if a cache entry was made with the current schema version and still validates."""
+    if not isinstance(entry, dict) or entry.get("_schema_version") != SCHEMA_VERSION:
+        return False
+    try:
+        model_cls.model_validate(entry)
+        return True
+    except ValidationError:
+        return False

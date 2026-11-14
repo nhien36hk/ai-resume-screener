@@ -4,7 +4,7 @@ from typing import List, Tuple
 from src.config import CV_HEADERS
 
 H_PATTERN = "|".join(sorted(map(re.escape, CV_HEADERS), key=len, reverse=True))
-HEADER_RE = re.compile(rf"(?<![A-Za-z])({H_PATTERN})(?=[A-Z0-9:\s-])")
+HEADER_RE = re.compile(rf"(?<![A-Za-z])({H_PATTERN})(?=[A-Z0-9:\s-]):?")  # drop the colon after a header so the next segment does not start with ":"
 SENT_RE = re.compile(r"(?<=[.!?;])\s+(?=[A-Z])|\s+[-•●▪]\s*(?=[A-Z])")
 MAX_SEGMENT_WORDS = 30
 

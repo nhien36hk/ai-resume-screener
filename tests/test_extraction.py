@@ -1,214 +1,150 @@
+import importlib.util
 import json
-import os
 from pathlib import Path
-import tempfile
-from typing import Any, Dict, List, Tuple
-from unittest.mock import MagicMock
 
+import pandas as pd
 from pydantic import ValidationError
 import pytest
 
-from src.config import DEGREE_LEVELS, MAJOR_GROUPS
-from src.data.extractor import (
-    BaseExtractorBackend,
-    extract_cv_entities,
-    extract_jd_entities,
-    format_evidence_text,
-)
-from src.data.schemas import (
-    CVEntities,
-    JDEntities,
-    SCHEMA_VERSION,
-    get_cv_json_schema,
-    get_jd_json_schema,
-)
-from src.utils import load_json, save_json
+from src.data.extractor import extract_many, format_evidence_text
+from src.data.schemas import SCHEMA_VERSION, CVEntities, JDEntities, is_current, json_schema
+from src.features.text import segment_text
+from src.utils import compute_text_hash, load_json, save_json
+
+ROOT = Path(__file__).resolve().parent.parent
 
 
-def test_schema_normalization_and_validation():
-    # 1. Normalization: lowercase, strip, dedup with order preserved
-    jd_raw = {
-        "job_title": "Backend Lead",
-        "must_have_skills": [" Python ", "python", "Django", "DJANGO"],
-        "nice_to_have_skills": [" AWS ", "aws", "Docker"],
-        "min_years_experience": "3-5 years",
-        "min_degree": "Bachelor ",
-        "required_certs": [" AWS Certified Architect ", "aws certified architect"],
-        "education_evidence_ids": [1, 2],
-        "required_majors": [" Computer Science ", "computer science"],
-        "major_group": "computer_science",
-        "accepts_related_field": True,
-    }
-    jd = JDEntities.model_validate(jd_raw)
-    assert jd.must_have_skills == ["python", "django"]
-    assert jd.nice_to_have_skills == ["aws", "docker"]
-    assert jd.min_years_experience == 3.0
-    assert jd.min_degree == "bachelor"
-    assert jd.required_certs == ["AWS Certified Architect"]
-    assert jd.required_majors == ["computer science"]
+def load_script(name: str):
+    spec = importlib.util.spec_from_file_location(name, ROOT / "scripts" / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
-    # 2. Invalid degree enum value must raise ValidationError
+
+CV_OK = {
+    "candidate_title": "Engineer",
+    "skills": ["Python", "python", " SQL "],
+    "total_years_experience": 3,
+    "certs": [],
+    "education_evidence_ids": [1],
+    "highest_degree": "bachelor",
+    "majors": ["computer science"],
+    "major_group": "computer_science",
+}
+JD_OK = {
+    "job_title": "Engineer",
+    "must_have_skills": ["python"],
+    "nice_to_have_skills": [],
+    "min_years_experience": 2,
+    "required_certs": [],
+    "education_evidence_ids": [],
+    "min_degree": "bachelor",
+    "required_majors": [],
+    "major_group": "unknown",
+    "accepts_related_field": False,
+}
+
+
+class FakeBackend:
+    """Returns queued outputs and records every generate() call."""
+    name = "fake"
+    model_name = "fake-model"
+
+    def __init__(self, *rounds):
+        self.rounds = list(rounds)
+        self.calls = []
+
+    def generate(self, prompts, schema, max_tokens):
+        self.calls.append((prompts, max_tokens))
+        if self.rounds:
+            return self.rounds.pop(0)
+        return [(json.dumps(CV_OK), "stop")] * len(prompts)
+
+
+def test_schema_requires_every_field_and_forbids_extras():
+    for model_cls in (JDEntities, CVEntities):
+        schema = json_schema(model_cls)
+        assert set(schema["required"]) == set(schema["properties"])
+        assert schema["additionalProperties"] is False
     with pytest.raises(ValidationError):
-        JDEntities.model_validate({**jd_raw, "min_degree": "invalid_degree"})
-
-    # 3. Invalid major_group enum value must raise ValidationError
-    with pytest.raises(ValidationError):
-        JDEntities.model_validate({**jd_raw, "major_group": "non_existent_major"})
-
-    # 4. maxItems enforcement (skills <= 40)
-    oversized_skills = [f"skill_{i}" for i in range(45)]
-    with pytest.raises(ValidationError):
-        JDEntities.model_validate({**jd_raw, "must_have_skills": oversized_skills})
-
-    # 5. CV schema normalization
-    cv_raw = {
-        "candidate_title": "ML Engineer",
-        "skills": [" PyTorch ", "pytorch", "SQL"],
-        "total_years_experience": "4.5",
-        "highest_degree": "Master",
-        "certs": ["Deep Learning Specialization"],
-        "education_evidence_ids": [2],
-        "majors": [" Data Science ", "data science"],
-        "major_group": "data_science_ai",
-    }
-    cv = CVEntities.model_validate(cv_raw)
-    assert cv.skills == ["pytorch", "sql"]
-    assert cv.total_years_experience == 4.5
-    assert cv.highest_degree == "master"
-    assert cv.majors == ["data science"]
+        CVEntities.model_validate({k: v for k, v in CV_OK.items() if k != "major_group"})
 
 
-def test_needs_extraction():
-    import importlib
-    extract_mod = importlib.import_module("scripts.02_extract_entities")
-    needs_extraction = extract_mod.needs_extraction
-
-    # None or empty entry needs extraction
-    assert needs_extraction(None, JDEntities) is True
-    assert needs_extraction({}, JDEntities) is True
-
-    # Old entry without major_group or with _schema_version < 2 needs extraction
-    old_jd = {
-        "job_title": "Engineer",
-        "must_have_skills": ["python"],
-        "min_years_experience": 2.0,
-        "min_degree": "bachelor",
-        "required_certs": [],
-    }
-    assert needs_extraction(old_jd, JDEntities) is True
-
-    # Complete valid entry with current SCHEMA_VERSION does NOT need extraction
-    valid_jd = {
-        "job_title": "Engineer",
-        "must_have_skills": ["python"],
-        "nice_to_have_skills": [],
-        "min_years_experience": 2.0,
-        "min_degree": "bachelor",
-        "required_certs": [],
-        "education_evidence_ids": [1],
-        "required_majors": ["computer science"],
-        "major_group": "computer_science",
-        "accepts_related_field": True,
-        "_schema_version": SCHEMA_VERSION,
-    }
-    assert needs_extraction(valid_jd, JDEntities) is False
+def test_validators_reject_wrong_types_and_normalize():
+    cv = CVEntities.model_validate(CV_OK)
+    assert cv.skills == ["python", "sql"]
+    assert JDEntities.model_validate({**JD_OK, "min_years_experience": "3-5 years"}).min_years_experience == 3.0
+    for bad in ({"skills": "python"}, {"total_years_experience": "abc"}, {"major_group": "nonsense"}):
+        with pytest.raises(ValidationError):
+            CVEntities.model_validate({**CV_OK, **bad})
 
 
-def test_parser_and_evidence_ids():
-    segments = ["Header", "Required: Bachelor in Computer Science", "Skills: Python, SQL"]
-
-    # In-bounds evidence_ids format correctly
-    evidence_text = format_evidence_text(segments, [2])
-    assert evidence_text == "Required: Bachelor in Computer Science"
-
-    # Out of bounds evidence_ids are safely ignored
-    evidence_text_oob = format_evidence_text(segments, [2, 99, -1, 0])
-    assert evidence_text_oob == "Required: Bachelor in Computer Science"
-
-    # Extraction fails when backend returns invalid JSON - never returns default fake entity
-    class BrokenMockBackend(BaseExtractorBackend):
-        def extract_one(self, messages, schema, schema_name, max_tokens=1024):
-            raise RuntimeError("Model generation failed")
-
-    broken_backend = BrokenMockBackend()
-    with pytest.raises(RuntimeError):
-        extract_jd_entities("Job description text", backend=broken_backend)
+def test_old_cache_entry_is_not_current():
+    old_entry = {k: v for k, v in CV_OK.items() if k not in ("majors", "major_group")}
+    assert not is_current(CVEntities, old_entry)
+    assert not is_current(CVEntities, CV_OK)  # valid fields but no schema version
+    assert is_current(CVEntities, {**CV_OK, "_schema_version": SCHEMA_VERSION})
 
 
-def test_atomic_save_and_strict_load():
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        tmp_path = Path(tmp_dir) / "cache.json"
+def test_extract_many_isolates_errors_and_retries_once():
+    backend = FakeBackend(
+        [(json.dumps(CV_OK), "stop"), ("{broken", "stop"), ('{"candidate', "length")],
+        [("{still broken", "stop"), (json.dumps(CV_OK), "stop")],
+    )
+    results = extract_many("cv", ["Education BS Computer Science", "cv two", "cv three"], backend)
 
-        # 1. Atomic write succeeds and leaves no temporary files
-        data = {"key": "value", "numbers": [1, 2, 3]}
-        save_json(tmp_path, data)
-        assert tmp_path.exists()
-        assert list(Path(tmp_dir).glob("*.tmp*")) == []
+    assert [len(p) for p, _ in backend.calls] == [3, 2]
+    assert [t for _, t in backend.calls] == [1024, 2048]
+    first_prompts, retry_prompts = backend.calls[0][0], backend.calls[1][0]
+    assert len(retry_prompts[0]) == len(first_prompts[1]) + 2  # invalid JSON: feedback turns added
+    assert retry_prompts[1] == first_prompts[2]  # truncated: same prompt, bigger budget
 
-        loaded = load_json(tmp_path)
-        assert loaded == data
-
-        # 2. Non-existent file returns default value
-        missing_path = Path(tmp_dir) / "missing.json"
-        assert load_json(missing_path, default_val={"default": True}) == {"default": True}
-
-        # 3. Corrupted file raises JSONDecodeError, never returns empty dict silently
-        corrupted_path = Path(tmp_dir) / "corrupt.json"
-        with open(corrupted_path, "w", encoding="utf-8") as f:
-            f.write("{invalid json...")
-
-        with pytest.raises(json.JSONDecodeError):
-            load_json(corrupted_path)
+    assert results[0]["_schema_version"] == SCHEMA_VERSION and results[0]["_backend"] == "fake"
+    assert results[0]["major_evidence"] == "Education"  # evidence id [1] -> first segment
+    assert isinstance(results[1], str) and results[1].startswith("invalid")
+    assert isinstance(results[2], dict)
 
 
-class MockCoordinatorBackend(BaseExtractorBackend):
-    def __init__(self):
-        self.model_name = "mock-model"
+def test_run_task_sends_one_batched_call_per_chunk():
+    script = load_script("02_extract_entities")
+    items = {f"k{i}": f"cv {i}" for i in range(10)}
+    cache, failed, saves = {}, {"k3": {"error": "old"}}, []
+    backend = FakeBackend()
 
-    def extract_one(self, messages, schema, schema_name, max_tokens=1024):
-        if schema_name == "jd_schema":
-            return {
-                "job_title": "Software Engineer",
-                "must_have_skills": ["python", "sql"],
-                "nice_to_have_skills": ["docker"],
-                "min_years_experience": 2.0,
-                "min_degree": "bachelor",
-                "required_certs": [],
-                "education_evidence_ids": [1],
-                "required_majors": ["computer science"],
-                "major_group": "computer_science",
-                "accepts_related_field": True,
-            }, 0, 0
-        else:
-            return {
-                "candidate_title": "Software Engineer",
-                "skills": ["python", "sql"],
-                "total_years_experience": 3.0,
-                "highest_degree": "bachelor",
-                "certs": [],
-                "education_evidence_ids": [1],
-                "majors": ["computer science"],
-                "major_group": "computer_science",
-            }, 0, 0
+    ok, bad = script.run_task("cv", list(items), items, cache, failed, backend, 4, lambda: saves.append(1))
+
+    assert [len(p) for p, _ in backend.calls] == [4, 4, 2]
+    assert (ok, bad, len(cache), len(saves)) == (10, 0, 10, 3)
+    assert failed == {}
 
 
-def test_mock_backend_coordination_end_to_end():
-    mock_backend = MockCoordinatorBackend()
-    sample_cvs = [
-        "Candidate 1 with 3 years Python development experience. Bachelor in CS.",
-        "Candidate 2 with 2 years Python and SQL experience. Bachelor in CS.",
-        "Candidate 3 with 5 years experience in Software Engineering.",
-    ]
+def test_merge_strict_stops_when_entities_are_missing(tmp_path):
+    merge = load_script("03_merge_splits")
+    pd.DataFrame([{
+        "resume_text": "cv text", "job_description_text": "jd text",
+        "label": 1, "job_id": "JD_0000", "label_text": "Potential Fit",
+    }]).to_parquet(tmp_path / "val.parquet")
+    jd_cache = {"JD_0000": {**JD_OK, "_schema_version": SCHEMA_VERSION}}
 
-    extracted_results = []
-    for cv_text in sample_cvs:
-        ent = extract_cv_entities(cv_text, backend=mock_backend)
-        extracted_results.append(ent)
+    with pytest.raises(SystemExit):
+        merge.process_split("val", tmp_path, jd_cache, {})
+    assert not (tmp_path / "val.jsonl").exists()
 
-    assert len(extracted_results) == 3
-    for ent in extracted_results:
-        assert ent["_schema_version"] == SCHEMA_VERSION
-        assert ent["_backend"] == "vllm" or ent["_backend"] == "nvidia"
-        assert ent["highest_degree"] == "bachelor"
-        assert ent["major_group"] == "computer_science"
-        assert "major_evidence" in ent
+    cv_cache = {compute_text_hash("cv text"): {**CV_OK, "_schema_version": SCHEMA_VERSION}}
+    assert merge.process_split("val", tmp_path, jd_cache, cv_cache)["kept"] == 1
+
+
+def test_evidence_and_segments():
+    assert format_evidence_text(["a", "b", "c"], [2, 99, 0, -1]) == "b"
+    assert segment_text("Skills: SQL, Excel") == ["Skills", "SQL, Excel"]
+
+
+def test_atomic_save_and_strict_load(tmp_path):
+    path = tmp_path / "cache.json"
+    save_json(path, {"a": [1, 2]})
+    assert load_json(path) == {"a": [1, 2]}
+    assert list(tmp_path.glob("*.tmp*")) == []
+    assert load_json(tmp_path / "missing.json", {"d": 1}) == {"d": 1}
+    path.write_text("{broken", encoding="utf-8")
+    with pytest.raises(json.JSONDecodeError):
+        load_json(path)

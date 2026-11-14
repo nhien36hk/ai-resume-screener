@@ -90,11 +90,9 @@ def save_datasets(
     processed_dir.mkdir(parents=True, exist_ok=True)
 
     df_all.to_parquet(raw_dir / "raw_dataset.parquet", index=False)
-    df_all.to_csv(raw_dir / "raw_dataset.csv", index=False)
 
     for name, split_df in [("train", train_df), ("val", val_df), ("test", test_df)]:
         split_df.to_parquet(processed_dir / f"{name}.parquet", index=False)
-        split_df.to_csv(processed_dir / f"{name}.csv", index=False)
 
     print(f"Đã lưu thành công vào: {raw_dir} và {processed_dir}")
 

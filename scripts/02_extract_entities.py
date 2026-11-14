@@ -1,12 +1,15 @@
+"""Extract JD/CV entities into the JSON caches.
+
+Re-running only processes items that are missing, outdated (older schema version) or invalid.
+    python scripts/02_extract_entities.py --dry-run
+    python scripts/02_extract_entities.py --backend vllm --model Qwen/Qwen3-14B-FP8
+"""
 import argparse
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import os
 from pathlib import Path
 import shutil
 import sys
 import time
-from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 from tqdm import tqdm
@@ -25,313 +28,132 @@ from src.config import (
     MAJOR_GROUPS,
     PROCESSED_DIR,
 )
-from src.data.extractor import (
-    BaseExtractorBackend,
-    NvidiaAPIBackend,
-    VLLMBackend,
-    extract_cv_entities,
-    extract_jd_entities,
-)
-from src.data.schemas import (
-    CVEntities,
-    JDEntities,
-    SCHEMA_VERSION,
-)
+from src.data.extractor import NvidiaAPIBackend, VLLMBackend, extract_many
+from src.data.schemas import CVEntities, JDEntities, is_current
 from src.utils import compute_text_hash, load_json, save_json, to_markdown_table
 
-
-def needs_extraction(entry: Optional[Dict[str, Any]], schema_cls: Any) -> bool:
-    if not entry or not isinstance(entry, dict):
-        return True
-    if entry.get("_schema_version", 1) < SCHEMA_VERSION:
-        return True
-    try:
-        schema_cls.model_validate(entry)
-        return False
-    except Exception:
-        return True
+KINDS = {"jd": JDEntities, "cv": CVEntities}
 
 
-def backup_cache_file(cache_path: Path) -> None:
-    if cache_path.exists() and cache_path.stat().st_size > 0:
-        backup_path = cache_path.with_suffix(".bak.json")
-        if not backup_path.exists():
-            shutil.copy2(cache_path, backup_path)
+def collect_items(data_dir: Path) -> dict[str, dict[str, str]]:
+    """Unique documents of all three splits: JDs keyed by job_id, CVs by text hash."""
+    df = pd.concat([pd.read_parquet(data_dir / f"{s}.parquet") for s in ("train", "val", "test")])
+    return {
+        "jd": dict(zip(df["job_id"].astype(str), df["job_description_text"])),
+        "cv": {compute_text_hash(t): t for t in df["resume_text"].unique()},
+    }
 
 
-def load_dataset_splits(data_dir: Path) -> pd.DataFrame:
-    splits = []
-    for split_file in ["train.parquet", "val.parquet", "test.parquet"]:
-        p = data_dir / split_file
-        if p.exists():
-            splits.append(pd.read_parquet(p))
-    if not splits:
-        raise FileNotFoundError(f"Không tìm thấy file parquet trong {data_dir}")
-    return pd.concat(splits, ignore_index=True)
-
-
-def process_jd_item(
-    job_id: str,
-    jd_text: str,
-    backend: BaseExtractorBackend,
-    model_name: str,
-) -> Tuple[str, Optional[Dict[str, Any]], Optional[str]]:
-    try:
-        res = extract_jd_entities(jd_text, backend=backend, model_name=model_name)
-        return job_id, res, None
-    except Exception as e:
-        return job_id, None, str(e)
-
-
-def process_cv_item(
-    c_hash: str,
-    cv_text: str,
-    backend: BaseExtractorBackend,
-    model_name: str,
-) -> Tuple[str, Optional[Dict[str, Any]], Optional[str]]:
-    try:
-        res = extract_cv_entities(cv_text, backend=backend, model_name=model_name)
-        return c_hash, res, None
-    except Exception as e:
-        return c_hash, None, str(e)
-
-
-def run_pipeline(args: argparse.Namespace) -> None:
-    df = load_dataset_splits(args.data_dir)
-    print(f">>> Đã nạp dữ liệu gộp cả 3 split: {len(df):,} cặp (CV, JD).")
-
-    unique_jds_df = df[["job_id", "job_description_text"]].drop_duplicates(subset=["job_id"])
-    unique_jds = [(str(row["job_id"]), row["job_description_text"]) for _, row in unique_jds_df.iterrows()]
-    unique_cvs = list(df["resume_text"].drop_duplicates())
-
-    jd_cache: Dict[str, Any] = load_json(args.jd_cache, {})
-    cv_cache: Dict[str, Any] = load_json(args.cv_cache, {})
-    failed_extractions: Dict[str, Any] = load_json(args.failed_file, {"jds": {}, "cvs": {}})
-    failed_jds = failed_extractions.get("jds", {})
-    failed_cvs = failed_extractions.get("cvs", {})
-
-    needed_jds: List[Tuple[str, str]] = []
-    if args.only in ("all", "jd"):
-        for j_id, text in unique_jds:
-            if args.force:
-                needed_jds.append((j_id, text))
-            elif args.retry_failed:
-                if j_id in failed_jds:
-                    needed_jds.append((j_id, text))
-            elif needs_extraction(jd_cache.get(j_id), JDEntities):
-                needed_jds.append((j_id, text))
-
-    needed_cvs: List[Tuple[str, str]] = []
-    if args.only in ("all", "cv"):
-        for cv_text in unique_cvs:
-            c_hash = compute_text_hash(cv_text)
-            if args.force:
-                needed_cvs.append((c_hash, cv_text))
-            elif args.retry_failed:
-                if c_hash in failed_cvs:
-                    needed_cvs.append((c_hash, cv_text))
-            elif needs_extraction(cv_cache.get(c_hash), CVEntities):
-                needed_cvs.append((c_hash, cv_text))
-
-    if args.sample is not None and args.sample > 0:
-        needed_jds = needed_jds[:args.sample]
-        failed_needed = [item for item in needed_cvs if item[0] in failed_cvs]
-        normal_needed = [item for item in needed_cvs if item[0] not in failed_cvs]
-        if failed_needed:
-            needed_cvs = [failed_needed[0]] + normal_needed[:max(0, args.sample - 1)]
-        else:
-            needed_cvs = needed_cvs[:args.sample]
-
-    print("\n" + "=" * 75)
-    print("KẾ HOẠCH BÓC TÁCH THỰC THỂ (EXTRACTION PLAN):")
-    print(f"- Backend              : {args.backend}")
-    print(f"- Model                : {args.model}")
-    print(f"- Tổng JD trong dữ liệu: {len(unique_jds)} (Cần xử lý: {len(needed_jds)})")
-    print(f"- Tổng CV trong dữ liệu: {len(unique_cvs)} (Cần xử lý: {len(needed_cvs)})")
-    print(f"- Đang có trong cache  : {len(jd_cache)} JDs, {len(cv_cache)} CVs")
-    print(f"- Số mục từng lỗi trước: {len(failed_jds)} JDs, {len(failed_cvs)} CVs")
-    print("=" * 75)
-
-    if args.dry_run:
-        print(">>> [--dry-run kích hoạt] Chỉ in kế hoạch, không gọi model. Dừng tại đây.")
-        return
-
-    if not needed_jds and not needed_cvs:
-        print(">>> Toàn bộ dữ liệu đã được bóc tách hợp lệ theo schema hiện tại! Không có mục cần xử lý.")
-        return
-
-    backup_cache_file(args.jd_cache)
-    backup_cache_file(args.cv_cache)
-
-    if args.backend == "nvidia":
-        backend: BaseExtractorBackend = NvidiaAPIBackend(
-            model_name=args.model,
-            rpm=args.rpm,
-        )
+def plan(kind: str, items: dict[str, str], cache: dict, failed: dict, args: argparse.Namespace) -> list[str]:
+    if args.retry_failed:
+        keys = [k for k in items if k in failed]
+    elif args.force:
+        keys = list(items)
     else:
-        backend = VLLMBackend(model_name=args.model)
+        keys = [k for k in items if not is_current(KINDS[kind], cache.get(k))]
+    if args.sample:
+        keys = sorted(keys, key=lambda k: k not in failed)[:args.sample]  # previously failed first, to test the fix
+    return keys
 
-    start_time = time.time()
-    jd_succ = 0
-    jd_fail = 0
-    cv_succ = 0
-    cv_fail = 0
 
-    def save_checkpoints():
-        save_json(args.jd_cache, jd_cache)
-        save_json(args.cv_cache, cv_cache)
-        save_json(args.failed_file, failed_extractions)
-
-    try:
-        # Phase 1: JD Extraction
-        if needed_jds:
-            print(f"\n[PHASE 1] Xử lý {len(needed_jds)} Job Descriptions...")
-            if args.backend == "nvidia":
-                with ThreadPoolExecutor(max_workers=args.workers) as executor:
-                    futures = {
-                        executor.submit(process_jd_item, j_id, text, backend, args.model): j_id
-                        for j_id, text in needed_jds
-                    }
-                    for idx, future in enumerate(tqdm(as_completed(futures), total=len(futures), desc="Trích xuất JD"), 1):
-                        j_id, res, err = future.result()
-                        if res is not None:
-                            jd_cache[j_id] = res
-                            jd_succ += 1
-                            if j_id in failed_jds:
-                                del failed_jds[j_id]
-                        else:
-                            jd_fail += 1
-                            failed_jds[j_id] = {
-                                "error": err,
-                                "timestamp": time.time(),
-                            }
-                        if idx % 5 == 0 or idx == len(futures):
-                            save_checkpoints()
+def run_task(kind: str, keys: list[str], items: dict[str, str], cache: dict, failed: dict,
+             backend, chunk_size: int, checkpoint) -> tuple[int, int]:
+    """Extract in chunks; each chunk is one batched backend call, saved before the next one starts."""
+    ok = bad = 0
+    for start in tqdm(range(0, len(keys), chunk_size), desc=f"{kind.upper()} chunks"):
+        chunk = keys[start:start + chunk_size]
+        for key, result in zip(chunk, extract_many(kind, [items[k] for k in chunk], backend)):
+            if isinstance(result, dict):
+                cache[key] = result
+                failed.pop(key, None)
+                ok += 1
             else:
-                for idx, (j_id, text) in enumerate(tqdm(needed_jds, desc="Trích xuất JD (vLLM)"), 1):
-                    _, res, err = process_jd_item(j_id, text, backend, args.model)
-                    if res is not None:
-                        jd_cache[j_id] = res
-                        jd_succ += 1
-                        if j_id in failed_jds:
-                            del failed_jds[j_id]
-                    else:
-                        jd_fail += 1
-                        failed_jds[j_id] = {"error": err, "timestamp": time.time()}
-                    if idx % 5 == 0 or idx == len(needed_jds):
-                        save_checkpoints()
+                failed[key] = {"error": result, "timestamp": time.time(), "preview": items[key][:300]}
+                bad += 1
+        checkpoint()
+    return ok, bad
 
-        # Phase 2: CV Extraction
-        if needed_cvs:
-            print(f"\n[PHASE 2] Xử lý {len(needed_cvs)} Resumes / CVs...")
-            if args.backend == "nvidia":
-                with ThreadPoolExecutor(max_workers=args.workers) as executor:
-                    futures = {
-                        executor.submit(process_cv_item, c_hash, text, backend, args.model): c_hash
-                        for c_hash, text in needed_cvs
-                    }
-                    for idx, future in enumerate(tqdm(as_completed(futures), total=len(futures), desc="Trích xuất CV"), 1):
-                        c_hash, res, err = future.result()
-                        if res is not None:
-                            cv_cache[c_hash] = res
-                            cv_succ += 1
-                            if c_hash in failed_cvs:
-                                del failed_cvs[c_hash]
-                        else:
-                            cv_fail += 1
-                            failed_cvs[c_hash] = {
-                                "error": err,
-                                "timestamp": time.time(),
-                            }
-                        if idx % 5 == 0 or idx == len(futures):
-                            save_checkpoints()
-            else:
-                for idx, (c_hash, text) in enumerate(tqdm(needed_cvs, desc="Trích xuất CV (vLLM)"), 1):
-                    _, res, err = process_cv_item(c_hash, text, backend, args.model)
-                    if res is not None:
-                        cv_cache[c_hash] = res
-                        cv_succ += 1
-                        if c_hash in failed_cvs:
-                            del failed_cvs[c_hash]
-                    else:
-                        cv_fail += 1
-                        failed_cvs[c_hash] = {"error": err, "timestamp": time.time()}
-                    if idx % 5 == 0 or idx == len(needed_cvs):
-                        save_checkpoints()
 
-    except KeyboardInterrupt:
-        print("\n[CẢNH BÁO] Nhận tín hiệu ngắt (Ctrl+C). Đang lưu cache checkpoint...")
-        save_checkpoints()
-        print(">>> Đã lưu cache an toàn. Chạy lại script để tiếp tục.")
-        return
+def backup(path: Path) -> None:
+    target = path.with_suffix(".bak.json")
+    if path.exists() and not target.exists():
+        shutil.copy2(path, target)
 
-    save_checkpoints()
-    total_time = time.time() - start_time
-    total_processed = jd_succ + jd_fail + cv_succ + cv_fail
-    throughput = total_processed / max(total_time, 0.001)
 
-    print("\n" + "=" * 75)
-    print("BÁO CÁO KẾT QUẢ TRÍCH XUẤT:")
+def print_distribution(title: str, values: list[str], jd: Counter, cv: Counter) -> None:
+    rows = [[v, jd[v], cv[v]] for v in values if jd[v] or cv[v]]
+    print(f"\n{title}:\n" + to_markdown_table(["Giá trị", "JD", "CV"], rows))
 
-    summary_headers = ["Chỉ số", "JD", "CV", "Tổng cộng"]
-    summary_rows = [
-        ["Tổng số mẫu đầu vào", str(len(unique_jds)), str(len(unique_cvs)), str(len(unique_jds) + len(unique_cvs))],
-        ["Mục tiêu trích xuất đợt này", str(len(needed_jds)), str(len(needed_cvs)), str(len(needed_jds) + len(needed_cvs))],
-        ["Trích xuất thành công", str(jd_succ), str(cv_succ), str(jd_succ + cv_succ)],
-        ["Thất bại", str(jd_fail), str(cv_fail), str(jd_fail + cv_fail)],
-        ["Tổng số hợp lệ trong cache hiện tại", str(len(jd_cache)), str(len(cv_cache)), str(len(jd_cache) + len(cv_cache))],
-        ["Thời gian thực thi", "-", "-", f"{total_time:.2f}s"],
-        ["Tốc độ (Throughput)", "-", "-", f"{throughput:.2f} items/s"],
-    ]
-    print(to_markdown_table(summary_headers, summary_rows))
 
-    # Major Group Distribution
-    jd_majors = Counter(v.get("major_group", "unknown") for v in jd_cache.values() if isinstance(v, dict))
-    cv_majors = Counter(v.get("major_group", "unknown") for v in cv_cache.values() if isinstance(v, dict))
-    major_headers = ["Major Group", "JD Count", "CV Count"]
-    major_rows = [
-        [mg, str(jd_majors.get(mg, 0)), str(cv_majors.get(mg, 0))]
-        for mg in MAJOR_GROUPS
-        if jd_majors.get(mg, 0) > 0 or cv_majors.get(mg, 0) > 0
-    ]
-    if major_rows:
-        print("\nPhân bố Major Group:")
-        print(to_markdown_table(major_headers, major_rows))
-
-    # Degree Distribution
-    jd_degrees = Counter(v.get("min_degree", "none") for v in jd_cache.values() if isinstance(v, dict))
-    cv_degrees = Counter(v.get("highest_degree", "none") for v in cv_cache.values() if isinstance(v, dict))
-    degree_headers = ["Degree Level", "JD min_degree", "CV highest_degree"]
-    degree_rows = [
-        [deg, str(jd_degrees.get(deg, 0)), str(cv_degrees.get(deg, 0))]
-        for deg in DEGREE_LEVELS
-    ]
-    print("\nPhân bố Bậc học (Degree):")
-    print(to_markdown_table(degree_headers, degree_rows))
-    print("=" * 75)
+def print_summary(items: dict, caches: dict, counts: dict, elapsed: float) -> None:
+    current = {k: [caches[k][key] for key in items[k] if is_current(m, caches[k].get(key))] for k, m in KINDS.items()}
+    rows = [[k.upper(), len(items[k]), *counts.get(k, (0, 0)), len(current[k])] for k in KINDS]
+    print("\n" + to_markdown_table(["Loại", "Tổng", "Mới trích", "Lỗi", "Hợp lệ"], rows))
+    print(f"Thời gian: {elapsed:.1f}s")
+    print_distribution("Nhóm ngành", MAJOR_GROUPS,
+                       Counter(e["major_group"] for e in current["jd"]), Counter(e["major_group"] for e in current["cv"]))
+    print_distribution("Bậc học", DEGREE_LEVELS,
+                       Counter(e["min_degree"] for e in current["jd"]), Counter(e["highest_degree"] for e in current["cv"]))
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Hệ thống trích xuất thực thể tuyển dụng hợp nhất (API & vLLM).")
-    parser.add_argument("--data-dir", type=Path, default=PROCESSED_DIR, help="Thư mục chứa parquet splits.")
-    parser.add_argument("--jd-cache", type=Path, default=JD_CACHE_PATH, help="Đường dẫn cache JD.")
-    parser.add_argument("--cv-cache", type=Path, default=CV_CACHE_PATH, help="Đường dẫn cache CV.")
-    parser.add_argument("--failed-file", type=Path, default=FAILED_EXTRACTIONS_PATH, help="Đường dẫn file lưu lỗi.")
-    parser.add_argument("--backend", choices=["nvidia", "vllm"], default="nvidia", help="Backend suy luận.")
-    parser.add_argument("--model", type=str, default=None, help="Tên model (mặc định lấy theo backend).")
-    parser.add_argument("--workers", type=int, default=4, help="Số luồng gọi song song cho API.")
-    parser.add_argument("--rpm", type=float, default=35.0, help="Giới hạn số request/phút cho API.")
-    parser.add_argument("--sample", type=int, default=None, help="Chỉ xử lý N JD và N CV đầu tiên cần trích xuất.")
-    parser.add_argument("--only", choices=["jd", "cv", "all"], default="all", help="Chỉ chạy riêng JD hoặc CV.")
-    parser.add_argument("--retry-failed", action="store_true", help="Chỉ chạy lại các mẫu trong failed_extractions.json.")
-    parser.add_argument("--dry-run", action="store_true", help="Chỉ in kế hoạch xử lý, không gọi model.")
-    parser.add_argument("--force", action="store_true", help="Trích xuất lại toàn bộ không quan tâm cache.")
-
-    args = parser.parse_args()
-    if args.model is None:
-        args.model = DEFAULT_NVIDIA_MODEL if args.backend == "nvidia" else DEFAULT_VLLM_MODEL
+    p = argparse.ArgumentParser(description="Trích xuất thực thể JD/CV bằng LLM (NVIDIA API hoặc vLLM).")
+    p.add_argument("--data-dir", type=Path, default=PROCESSED_DIR)
+    p.add_argument("--jd-cache", type=Path, default=JD_CACHE_PATH)
+    p.add_argument("--cv-cache", type=Path, default=CV_CACHE_PATH)
+    p.add_argument("--failed-file", type=Path, default=FAILED_EXTRACTIONS_PATH)
+    p.add_argument("--backend", choices=["nvidia", "vllm"], default="nvidia")
+    p.add_argument("--model", help="Mặc định theo backend.")
+    p.add_argument("--chunk-size", type=int, help="Số văn bản mỗi lần gọi model (mặc định: vllm 256, nvidia 20).")
+    p.add_argument("--workers", type=int, default=4, help="Số luồng gọi API song song.")
+    p.add_argument("--rpm", type=float, default=35.0, help="Giới hạn request/phút của API.")
+    p.add_argument("--sample", type=int, help="Chỉ xử lý N mục mỗi loại (ưu tiên mục từng lỗi).")
+    p.add_argument("--only", choices=["jd", "cv", "all"], default="all")
+    p.add_argument("--retry-failed", action="store_true", help="Chỉ chạy lại mục trong failed_extractions.json.")
+    p.add_argument("--force", action="store_true", help="Trích xuất lại tất cả.")
+    p.add_argument("--dry-run", action="store_true", help="Chỉ in kế hoạch, không gọi model.")
+    args = p.parse_args()
+    vllm = args.backend == "vllm"
+    args.model = args.model or (DEFAULT_VLLM_MODEL if vllm else DEFAULT_NVIDIA_MODEL)
+    args.chunk_size = args.chunk_size or (256 if vllm else 20)
     return args
 
 
+def main() -> None:
+    args = parse_args()
+    items = collect_items(args.data_dir)
+    caches = {"jd": load_json(args.jd_cache, {}), "cv": load_json(args.cv_cache, {})}
+    failed_all = load_json(args.failed_file, {})
+    failed = {k: failed_all.setdefault(f"{k}s", {}) for k in KINDS}
+
+    kinds = list(KINDS) if args.only == "all" else [args.only]
+    todo = {k: plan(k, items[k], caches[k], failed[k], args) for k in kinds}
+    rows = [[k.upper(), len(items[k]), len(todo[k]), len(failed[k])] for k in kinds]
+    print(f"Backend: {args.backend} | Model: {args.model} | Chunk: {args.chunk_size}")
+    print(to_markdown_table(["Loại", "Tổng", "Cần trích", "Từng lỗi"], rows))
+    if args.dry_run or not any(todo.values()):
+        return
+
+    backup(args.jd_cache)
+    backup(args.cv_cache)
+    backend = (VLLMBackend(args.model) if args.backend == "vllm"
+               else NvidiaAPIBackend(args.model, workers=args.workers, rpm=args.rpm))
+
+    def checkpoint() -> None:
+        save_json(args.jd_cache, caches["jd"])
+        save_json(args.cv_cache, caches["cv"])
+        save_json(args.failed_file, failed_all)
+
+    start, counts = time.time(), {}
+    try:
+        for k in kinds:
+            counts[k] = run_task(k, todo[k], items[k], caches[k], failed[k], backend, args.chunk_size, checkpoint)
+    except KeyboardInterrupt:
+        checkpoint()
+        print("\nĐã dừng. Các chunk xong đã được lưu, chạy lại để tiếp tục.")
+        return
+    print_summary(items, caches, counts, time.time() - start)
+
+
 if __name__ == "__main__":
-    run_pipeline(parse_args())
+    main()

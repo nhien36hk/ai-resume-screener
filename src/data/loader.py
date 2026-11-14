@@ -18,7 +18,7 @@ def load_split_records(
 ) -> List[Dict[str, Any]]:
     path = get_split_path(split_name, data_dir)
     if not path.exists():
-        raise FileNotFoundError(f"Không tìm thấy file split tại: {path}. Vui lòng chạy scripts/04_merge_splits.py trước.")
+        raise FileNotFoundError(f"Không tìm thấy file split tại: {path}. Vui lòng chạy scripts/03_merge_splits.py trước.")
 
     records = []
     with open(path, "r", encoding="utf-8") as f:

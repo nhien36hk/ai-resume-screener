@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 import sys
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -18,35 +18,16 @@ from src.config import (
     PROCESSED_DIR,
 )
 from src.data.loader import get_split_path
-from src.data.schemas import CVEntities, JDEntities
+from src.data.schemas import CVEntities, JDEntities, is_current
 from src.utils import compute_text_hash, load_json, to_markdown_table
-
-
-def is_valid_jd_entities(ent: Optional[Dict[str, Any]]) -> bool:
-    if not ent or not isinstance(ent, dict):
-        return False
-    try:
-        JDEntities.model_validate(ent)
-        return True
-    except Exception:
-        return False
-
-
-def is_valid_cv_entities(ent: Optional[Dict[str, Any]]) -> bool:
-    if not ent or not isinstance(ent, dict):
-        return False
-    try:
-        CVEntities.model_validate(ent)
-        return True
-    except Exception:
-        return False
 
 
 def process_split(
     split_name: str,
     data_dir: Path,
     jd_cache: Dict[str, Any],
-    cv_cache: Dict[str, Any]
+    cv_cache: Dict[str, Any],
+    strict: bool = True,
 ) -> Dict[str, Any]:
     parquet_path = data_dir / f"{split_name}.parquet"
     if not parquet_path.exists():
@@ -69,8 +50,8 @@ def process_split(
         jd_ent = jd_cache.get(job_id)
         cv_ent = cv_cache.get(c_hash)
 
-        has_valid_jd = is_valid_jd_entities(jd_ent)
-        has_valid_cv = is_valid_cv_entities(cv_ent)
+        has_valid_jd = is_current(JDEntities, jd_ent)
+        has_valid_cv = is_current(CVEntities, cv_ent)
 
         if not has_valid_jd or not has_valid_cv:
             dropped_count += 1
@@ -95,7 +76,11 @@ def process_split(
         kept_records.append(record)
 
     if dropped_count > 0:
-        print(f"[CẢNH BÁO] Tập {split_name} có {dropped_count}/{total_raw} mẫu bị loại do thiếu hoặc sai schema thực thể!")
+        msg = (f"Tập {split_name}: {dropped_count}/{total_raw} mẫu thiếu entity hợp lệ "
+               f"({missing_jd_count} thiếu JD, {missing_cv_count} thiếu CV). Chạy lại scripts/02_extract_entities.py.")
+        if strict:
+            sys.exit(f"[LỖI] {msg} Dùng --no-strict nếu chấp nhận bỏ các mẫu này.")
+        print(f"[CẢNH BÁO] {msg}")
 
     with open(output_path, "w", encoding="utf-8") as f:
         for rec in kept_records:
@@ -126,6 +111,8 @@ def parse_args():
     parser.add_argument("--jd-cache", type=Path, default=JD_CACHE_PATH, help="Đường dẫn file cache JD.")
     parser.add_argument("--cv-cache", type=Path, default=CV_CACHE_PATH, help="Đường dẫn file cache CV.")
     parser.add_argument("--splits", nargs="+", default=["train", "val", "test"], help="Danh sách splits cần xử lý.")
+    parser.add_argument("--strict", action=argparse.BooleanOptionalAction, default=True,
+                        help="Dừng với mã lỗi nếu có mẫu thiếu entity (mặc định bật), để test set không bị nhỏ đi âm thầm.")
     return parser.parse_args()
 
 
@@ -146,7 +133,7 @@ def main():
     results = []
 
     for split in args.splits:
-        stats = process_split(split, args.data_dir, jd_cache, cv_cache)
+        stats = process_split(split, args.data_dir, jd_cache, cv_cache, strict=args.strict)
         results.append(stats)
 
     elapsed = time.time() - start_time
