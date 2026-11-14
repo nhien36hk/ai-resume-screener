@@ -13,20 +13,26 @@ def compute_text_hash(text: str) -> str:
 
 def load_json(file_path: Union[str, Path], default_val: Any = None) -> Any:
     path = Path(file_path)
-    if path.exists():
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {} if default_val is None else default_val
-    return {} if default_val is None else default_val
+    if not path.exists():
+        return {} if default_val is None else default_val
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 def save_json(file_path: Union[str, Path], data: Any, indent: int = 2) -> None:
     path = Path(file_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=indent)
+    tmp_path = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=indent)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def set_seed(seed: int = 42) -> None:
@@ -75,4 +81,3 @@ def to_markdown_table(headers: List[str], rows: List[List[Any]]) -> str:
         for row in rows
     ]
     return "\n".join([header_line, separator_line] + data_lines)
-

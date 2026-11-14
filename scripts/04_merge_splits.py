@@ -18,21 +18,28 @@ from src.config import (
     PROCESSED_DIR,
 )
 from src.data.loader import get_split_path
+from src.data.schemas import CVEntities, JDEntities
 from src.utils import compute_text_hash, load_json, to_markdown_table
 
 
 def is_valid_jd_entities(ent: Optional[Dict[str, Any]]) -> bool:
     if not ent or not isinstance(ent, dict):
         return False
-    required_keys = ["must_have_skills", "min_years_experience", "min_degree"]
-    return all(k in ent for k in required_keys)
+    try:
+        JDEntities.model_validate(ent)
+        return True
+    except Exception:
+        return False
 
 
 def is_valid_cv_entities(ent: Optional[Dict[str, Any]]) -> bool:
     if not ent or not isinstance(ent, dict):
         return False
-    required_keys = ["skills", "total_years_experience", "highest_degree"]
-    return all(k in ent for k in required_keys)
+    try:
+        CVEntities.model_validate(ent)
+        return True
+    except Exception:
+        return False
 
 
 def process_split(
@@ -86,6 +93,9 @@ def process_split(
             "cv_entities": cv_ent,
         }
         kept_records.append(record)
+
+    if dropped_count > 0:
+        print(f"[CẢNH BÁO] Tập {split_name} có {dropped_count}/{total_raw} mẫu bị loại do thiếu hoặc sai schema thực thể!")
 
     with open(output_path, "w", encoding="utf-8") as f:
         for rec in kept_records:

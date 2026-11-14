@@ -9,9 +9,10 @@ PROCESSED_DIR = DATA_DIR / "processed"
 JD_CACHE_PATH = PROCESSED_DIR / "jd_cache.json"
 CV_CACHE_PATH = PROCESSED_DIR / "cv_cache.json"
 FAILED_EXTRACTIONS_PATH = PROCESSED_DIR / "failed_extractions.json"
-EXTRACTED_DATASET_PATH = PROCESSED_DIR / "extracted_dataset.json"
 
 # Domain Constants
+DEGREE_LEVELS = ["none", "high_school", "associate", "bachelor", "master", "phd"]
+
 LABEL_MAP = {
     "No Fit": 0,
     "Potential Fit": 1,
