@@ -10,8 +10,8 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 
 from src.config import DEFAULT_EMBEDDING_MODEL, FEATURES_DIR, MAX_SEQ_LENGTH, RESULTS_DIR
-from src.metrics import evaluate_all
-from src.pipeline import load_feature_tables
+from src.metrics import compute_all_metrics
+from src.pipeline import get_split_features
 from src.scoring import scale_p5_p95
 from src.tuning import search_best_thresholds
 from src.utils import save_json, to_markdown_table
@@ -34,7 +34,7 @@ def evaluate_variant(name, sim_col, train_feat, val_feat, test_feat):
     test_preds[test_scores >= best_t1] = 1
     test_preds[test_scores >= best_t2] = 2
 
-    metrics = evaluate_all(
+    metrics = compute_all_metrics(
         y_true=y_test,
         y_pred=test_preds,
         continuous_scores=test_scores,
@@ -53,7 +53,7 @@ def run_e3(seed: int) -> dict:
     encoder = SentenceTransformer(DEFAULT_EMBEDDING_MODEL)
     encoder.max_seq_length = MAX_SEQ_LENGTH
 
-    tables = load_feature_tables(FEATURES_DIR / "minilm_pretrained", encoder, seed)
+    tables = get_split_features(FEATURES_DIR / "minilm_pretrained", encoder, seed)
 
     res_3a = evaluate_variant("E3a (Truncate 256)", "sim_truncated_256", tables["train"], tables["val"], tables["test"])
     res_3b = evaluate_variant("E3b (Chunking 200/50, JD + CV)", "sim_chunk_200", tables["train"], tables["val"], tables["test"])

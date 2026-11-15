@@ -26,7 +26,7 @@ from src.scoring import (
 )
 
 
-def build_feature_table(
+def precompute_all_features(
     df: pd.DataFrame,
     model: Optional[SentenceTransformer] = None,
 ) -> pd.DataFrame:
@@ -159,13 +159,13 @@ def build_feature_table(
     return pd.DataFrame(rows)
     
 
-def load_feature_tables(feat_dir: Path, model: SentenceTransformer, seed: int) -> Dict[str, pd.DataFrame]:
+def get_split_features(feat_dir: Path, model: SentenceTransformer, seed: int) -> Dict[str, pd.DataFrame]:
     """Bảng feature là cache duy nhất: all.parquet dùng chung mọi seed, cắt theo split_ids(seed)."""
     feat_dir.mkdir(parents=True, exist_ok=True)
     all_parquet = feat_dir / "all.parquet"
     if not all_parquet.exists() or (ALL_PAIRS_PATH.exists() and all_parquet.stat().st_mtime < ALL_PAIRS_PATH.stat().st_mtime):
         print(f"Tính bảng feature toàn bộ -> {all_parquet}")
-        build_feature_table(load_all(), model).to_parquet(all_parquet, index=False)
+        precompute_all_features(load_all(), model).to_parquet(all_parquet, index=False)
 
     df_feat = pd.read_parquet(all_parquet)
     splits = split_ids(seed)

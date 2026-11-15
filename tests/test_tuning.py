@@ -36,15 +36,15 @@ def test_search_best_weights_and_thresholds():
 
 
 def test_vectorized_combined_matches_scalar_formulas():
-    """aggregate + cap_must_have (dùng trong grid search) phải ra đúng như weighted_score + apply_must_have."""
+    """weighted_sum_scores + apply_must_have_penalty phải ra đúng như weighted_score + apply_must_have."""
     from src.scoring import apply_must_have, weighted_score
-    from src.tuning import CRITERIA, aggregate, cap_must_have, to_labels
+    from src.tuning import CRITERIA, apply_must_have_penalty, to_labels, weighted_sum_scores
 
     X = np.array([[80.0, 90.0, 100.0, 0.0, 0.0], [60.0, 50.0, 0.0, 70.0, 100.0]])
     M = np.array([[1, 1, 1, 0, 0], [1, 1, 0, 1, 1]], dtype=float)  # 0 = tiêu chí bị skip
     w = np.array([0.3, 0.2, 0.2, 0.15, 0.15])
     failed = np.array([True, False])
-    s = cap_must_have(aggregate(X, M, w), failed, t2=70)
+    s = apply_must_have_penalty(weighted_sum_scores(X, M, w), failed, t2=70)
 
     for i in range(2):
         scores = {c: (X[i, k] if M[i, k] else None) for k, c in enumerate(CRITERIA)}

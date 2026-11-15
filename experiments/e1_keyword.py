@@ -11,7 +11,7 @@ import numpy as np
 from src.config import RESULTS_DIR
 from src.data.loader import load_split
 from src.features.skills import is_exact_match
-from src.metrics import evaluate_all
+from src.metrics import compute_all_metrics
 from src.tuning import search_best_thresholds
 from src.utils import save_json, to_markdown_table
 
@@ -57,7 +57,7 @@ def run_e1(seed: int) -> dict:
     test_preds[test_scores >= best_t1] = 1
     test_preds[test_scores >= best_t2] = 2
 
-    metrics = evaluate_all(
+    metrics = compute_all_metrics(
         y_true=y_test,
         y_pred=test_preds,
         continuous_scores=test_scores,

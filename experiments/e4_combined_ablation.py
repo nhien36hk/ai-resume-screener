@@ -10,8 +10,8 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 
 from src.config import DEFAULT_EMBEDDING_MODEL, FEATURES_DIR, MAX_SEQ_LENGTH, RESULTS_DIR
-from src.pipeline import load_feature_tables
-from src.tuning import CRITERIA, evaluate_combined_variant, tune_combined_model
+from src.pipeline import get_split_features
+from src.tuning import CRITERIA, find_best_hyperparams, tune_and_test_variant
 from src.utils import save_json, to_markdown_table
 
 
@@ -19,14 +19,14 @@ def run_e4(seed: int) -> dict:
     print(f"=== CHẠY THỰC NGHIỆM E4: MÔ HÌNH KẾT HỢP M4 VÀ ABLATION STUDY (Seed {seed}) ===")
     model = SentenceTransformer(DEFAULT_EMBEDDING_MODEL)
     model.max_seq_length = MAX_SEQ_LENGTH
-    tables = load_feature_tables(FEATURES_DIR / "minilm_pretrained", model, seed)
+    tables = get_split_features(FEATURES_DIR / "minilm_pretrained", model, seed)
     df_val, df_test = tables["val"], tables["test"]
 
     percentile_p5, percentile_p95 = (float(v) for v in np.percentile(tables["train"]["sim_chunk_200"], [5, 95]))
     print(f"Phân vị Train (seed {seed}): p5={percentile_p5:.4f}, p95={percentile_p95:.4f}")
 
     print(f"\n1. Tìm skill_threshold, trọng số weights và ngưỡng (t1, t2) trên tập Val (seed {seed})...")
-    cfg = tune_combined_model(df_val, percentile_p5, percentile_p95)
+    cfg = find_best_hyperparams(df_val, percentile_p5, percentile_p95)
     weights = cfg["weights"]
     print(f"-> Chọn skill_threshold={cfg['skill_threshold']}, w={dict(zip(CRITERIA, np.round(weights, 2).tolist()))}, t=({cfg['t1']:.0f}, {cfg['t2']:.0f})")
 
@@ -45,7 +45,7 @@ def run_e4(seed: int) -> dict:
     print(f"\n2. Đánh giá Full M4 và các biến thể Ablation trên tập Test (seed {seed})...")
     results = []
     for name, w_variant, skill_rule, exp_rule in variants:
-        m, (t1, t2) = evaluate_combined_variant(df_val, df_test, percentile_p5, percentile_p95, cfg["skill_threshold"], w_variant, skill_rule, exp_rule)
+        m, (t1, t2) = tune_and_test_variant(df_val, df_test, percentile_p5, percentile_p95, cfg["skill_threshold"], w_variant, skill_rule, exp_rule)
         results.append({"name": f"{name} (seed {seed})", "variant": name, "thresholds": (t1, t2), **m})
 
     full = results[0]

@@ -21,8 +21,8 @@ from transformers import EarlyStoppingCallback
 from src.config import ARTIFACTS_DIR, DEFAULT_EMBEDDING_MODEL, FEATURES_DIR, MAX_SEQ_LENGTH, RESULTS_DIR
 from src.data.loader import load_split
 from src.features.text import prepare_finetune_text
-from src.pipeline import load_feature_tables
-from src.tuning import CRITERIA, evaluate_combined_variant, tune_combined_model
+from src.pipeline import get_split_features
+from src.tuning import CRITERIA, find_best_hyperparams, tune_and_test_variant
 from src.utils import load_json, save_json, to_markdown_table
 
 TARGET_MAP = {0: 0.0, 1: 0.5, 2: 1.0}
@@ -98,13 +98,13 @@ def run_e5(seed: int) -> dict:
         model = train_e5(df_train, df_val, model_dir)
 
     feat_dir = FEATURES_DIR / "minilm_finetuned" / f"seed{seed}"
-    tables = load_feature_tables(feat_dir, model, seed)
+    tables = get_split_features(feat_dir, model, seed)
     percentile_p5, percentile_p95 = (float(v) for v in np.percentile(tables["train"]["sim_chunk_200"], [5, 95]))
 
     print(f"\nTối ưu siêu tham số trên tập Val cho mô hình M5 (seed {seed})...")
-    best_config = tune_combined_model(tables["val"], percentile_p5, percentile_p95)
+    best_config = find_best_hyperparams(tables["val"], percentile_p5, percentile_p95)
     threshold = best_config.get("skill_threshold", best_config.get("tau", 0.7))
-    m5_metrics, _ = evaluate_combined_variant(tables["val"], tables["test"], percentile_p5, percentile_p95, threshold, best_config["weights"])
+    m5_metrics, _ = tune_and_test_variant(tables["val"], tables["test"], percentile_p5, percentile_p95, threshold, best_config["weights"])
     print(f"-> M5 tối ưu (seed {seed}): skill_threshold={threshold}, t=({best_config['t1']:.0f}, {best_config['t2']:.0f})")
     best_config = {**best_config, "weights": dict(zip(CRITERIA, best_config["weights"].tolist())), "scaler": (percentile_p5, percentile_p95)}
 

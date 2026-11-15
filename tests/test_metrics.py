@@ -40,8 +40,8 @@ def test_ndcg_at_10():
 
 
 
-def test_evaluate_all_reports_both_ndcg_columns():
-    from src.metrics import evaluate_all
-    m = evaluate_all([2, 1, 0, 0, 0], [2, 2, 0, 0, 0], [90, 70, 30, 20, 10], ["J"] * 5)
+def test_compute_all_metrics_reports_both_ndcg_columns():
+    from src.metrics import compute_all_metrics
+    m = compute_all_metrics([2, 1, 0, 0, 0], [2, 2, 0, 0, 0], [90, 70, 30, 20, 10], ["J"] * 5)
     assert "ndcg_10" in m and "ndcg_10_cont" in m   # spec (theo y_pred) + D8 (theo điểm liên tục)
     assert abs(m["ndcg_10_cont"] - 1.0) < 1e-6

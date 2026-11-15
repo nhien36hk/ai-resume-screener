@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 
 from src.config import DEFAULT_THRESHOLDS, SKILL_THRESHOLDS
-from src.metrics import compute_macro_f1, compute_qwk, evaluate_all
+from src.metrics import compute_all_metrics, compute_macro_f1, compute_qwk
 from src.scoring import scale_p5_p95
 
 CRITERIA = ("sem", "skill", "exp", "edu", "cert")
@@ -30,7 +30,7 @@ def to_labels(scores: np.ndarray, t1: float, t2: float) -> np.ndarray:
     return np.where(scores >= t2, 2, np.where(scores >= t1, 1, 0))
 
 
-def cap_must_have(scores: np.ndarray, failed: np.ndarray, t2: float) -> np.ndarray:
+def apply_must_have_penalty(scores: np.ndarray, failed: np.ndarray, t2: float) -> np.ndarray:
     """Spec mục 4: cặp vi phạm must-have bị chặn ở t2 - 1."""
     return np.where(failed, np.minimum(scores, t2 - 1.0), scores)
 
@@ -48,11 +48,7 @@ def prepare_criteria_inputs(feat: pd.DataFrame, skill_threshold: float, percenti
     return np.nan_to_num(criteria_scores_matrix), criteria_mask_matrix, skill_fail, has_insufficient_exp
 
 
-# Backward compatibility alias
-m4_inputs = prepare_criteria_inputs
-
-
-def aggregate(scores_matrix: np.ndarray, mask_matrix: np.ndarray, weights: np.ndarray) -> np.ndarray:
+def weighted_sum_scores(scores_matrix: np.ndarray, mask_matrix: np.ndarray, weights: np.ndarray) -> np.ndarray:
     """Tính điểm tổng hợp có trọng số: S = Σ_{i∈A} w_i S_i / Σ_{i∈A} w_i."""
     den = mask_matrix @ weights
     return (scores_matrix * mask_matrix) @ weights / np.where(den > 0, den, 1e-9)
@@ -70,9 +66,9 @@ def search_best_weights(
     """B1: bộ trọng số cho QWK cao nhất trên Val tại ngưỡng khởi điểm (40, 70). Hoà -> bộ đứng trước."""
     if weight_grid is None:
         weight_grid = generate_weight_grid()
-    composite_scores = aggregate(scores_matrix, mask_matrix, weight_grid.T)  # (n, 3246)
+    composite_scores = weighted_sum_scores(scores_matrix, mask_matrix, weight_grid.T)  # (n, 3246)
     if must_have_failed is not None:
-        composite_scores = cap_must_have(composite_scores, must_have_failed[:, None], t2)
+        composite_scores = apply_must_have_penalty(composite_scores, must_have_failed[:, None], t2)
 
     best_qwk, best_weights = -1.0, weight_grid[0]
     for col in range(composite_scores.shape[1]):
@@ -95,14 +91,14 @@ def search_best_thresholds(
     best_f1, best_t1, best_t2 = -1.0, float(DEFAULT_THRESHOLDS[0]), float(DEFAULT_THRESHOLDS[1])
     for t1 in range(min_t1, max_t2, step):
         for t2 in range(t1 + 1, max_t2 + 1, step):
-            s = continuous_scores if must_have_failed is None else cap_must_have(continuous_scores, must_have_failed, t2)
+            s = continuous_scores if must_have_failed is None else apply_must_have_penalty(continuous_scores, must_have_failed, t2)
             f1 = compute_macro_f1(y, to_labels(s, t1, t2))
             if f1 > best_f1:
                 best_f1, best_t1, best_t2 = f1, float(t1), float(t2)
     return best_t1, best_t2, best_f1
 
 
-def tune_combined_model(val_feat: pd.DataFrame, percentile_p5: float, percentile_p95: float, skill_thresholds=SKILL_THRESHOLDS) -> Dict:
+def find_best_hyperparams(val_feat: pd.DataFrame, percentile_p5: float, percentile_p95: float, skill_thresholds=SKILL_THRESHOLDS) -> Dict:
     """Tìm skill_threshold, bộ trọng số weights và ngưỡng (t1, t2) tối ưu trên tập Validation."""
     y = val_feat["label"].to_numpy()
     grid = generate_weight_grid()
@@ -111,16 +107,16 @@ def tune_combined_model(val_feat: pd.DataFrame, percentile_p5: float, percentile
         criteria_scores, criteria_mask, skill_fail, exp_fail = prepare_criteria_inputs(val_feat, threshold, percentile_p5, percentile_p95)
         failed = skill_fail | exp_fail
         weights, _ = search_best_weights(criteria_scores, criteria_mask, y, failed, weight_grid=grid)
-        composite_scores = aggregate(criteria_scores, criteria_mask, weights)
+        composite_scores = weighted_sum_scores(criteria_scores, criteria_mask, weights)
         t1, t2, f1 = search_best_thresholds(composite_scores, y, failed)
-        qwk = compute_qwk(y, to_labels(cap_must_have(composite_scores, failed, t2), t1, t2))
+        qwk = compute_qwk(y, to_labels(apply_must_have_penalty(composite_scores, failed, t2), t1, t2))
         print(f"  skill_threshold={threshold}: QWK={qwk:.4f}  Macro-F1={f1:.4f}  weights={np.round(weights, 2).tolist()}  thresholds=({t1:.0f}, {t2:.0f})")
         if best is None or (qwk, f1) > (best["qwk"], best["f1"]):
             best = {"skill_threshold": threshold, "tau": threshold, "weights": weights, "t1": t1, "t2": t2, "qwk": qwk, "f1": f1}
     return best
 
 
-def evaluate_combined_variant(
+def tune_and_test_variant(
     val_feat: pd.DataFrame,
     test_feat: pd.DataFrame,
     percentile_p5: float,
@@ -134,16 +130,11 @@ def evaluate_combined_variant(
     skill_rule / exp_rule: bật điều kiện must-have tương ứng (ablation tắt điều kiện của tiêu chí bị bỏ)."""
     def scores(feat):
         criteria_scores, criteria_mask, skill_fail, exp_fail = prepare_criteria_inputs(feat, skill_threshold, percentile_p5, percentile_p95)
-        return aggregate(criteria_scores, criteria_mask, weights), (skill_fail & skill_rule) | (exp_fail & exp_rule)
+        return weighted_sum_scores(criteria_scores, criteria_mask, weights), (skill_fail & skill_rule) | (exp_fail & exp_rule)
 
     val_s, val_failed = scores(val_feat)
     t1, t2, _ = search_best_thresholds(val_s, val_feat["label"].to_numpy(), val_failed)
     test_s, test_failed = scores(test_feat)
-    final = cap_must_have(test_s, test_failed, t2)
-    metrics = evaluate_all(test_feat["label"].to_numpy(), to_labels(final, t1, t2), final, test_feat["job_id"].to_numpy())
+    final = apply_must_have_penalty(test_s, test_failed, t2)
+    metrics = compute_all_metrics(test_feat["label"].to_numpy(), to_labels(final, t1, t2), final, test_feat["job_id"].to_numpy())
     return metrics, (t1, t2)
-
-
-# Backward compatibility aliases
-tune_m4 = tune_combined_model
-evaluate_m4_variant = evaluate_combined_variant

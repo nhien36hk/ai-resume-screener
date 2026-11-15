@@ -52,7 +52,7 @@ def compute_ndcg_at_10(
     return float(np.mean(ndcg_list)) if ndcg_list else 0.0
 
 
-def evaluate_all(
+def compute_all_metrics(
     y_true: Union[List[int], np.ndarray],
     y_pred: Union[List[int], np.ndarray],
     continuous_scores: Optional[Union[List[float], np.ndarray]] = None,

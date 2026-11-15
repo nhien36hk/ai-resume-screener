@@ -50,12 +50,12 @@ def merge_and_verify() -> None:
         print(f">>> 2. Chưa có cache parquet trên server, đang tự động encode từ {ALL_PAIRS_PATH.name}...")
         from sentence_transformers import SentenceTransformer
         from src.config import DEFAULT_EMBEDDING_MODEL, MAX_SEQ_LENGTH
-        from src.pipeline import build_feature_table
+        from src.pipeline import precompute_all_features
         
         df_all = pd.read_json(ALL_PAIRS_PATH, lines=True)
         model = SentenceTransformer(DEFAULT_EMBEDDING_MODEL)
         model.max_seq_length = MAX_SEQ_LENGTH
-        feat_df = build_feature_table(df_all, model)
+        feat_df = precompute_all_features(df_all, model)
         feat_dir.mkdir(parents=True, exist_ok=True)
         feat_df.to_parquet(all_parquet_path, index=False)
         print(f"    -> Đã tính toán và lưu {len(feat_df):,} dòng vào {all_parquet_path.name}")
