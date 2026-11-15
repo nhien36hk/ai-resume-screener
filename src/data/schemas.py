@@ -35,7 +35,7 @@ Years = Annotated[float, Field(ge=0), BeforeValidator(_years)]  # Field first, o
 class JDEntities(BaseModel):
     job_title: str
     must_have_skills: StrList = Field(max_length=40)
-    nice_to_have_skills: StrList = Field(max_length=40)
+    nice_to_have_skills: StrList = Field(max_length=50)  # 02b dồn must thừa sang nice: pool tối đa 45 trên cache
     min_years_experience: Years
     required_certs: StrList = Field(max_length=10)
     education_evidence_ids: list[int] = Field(max_length=3)
