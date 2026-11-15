@@ -1,3 +1,4 @@
+import argparse
 from pathlib import Path
 import sys
 
@@ -7,6 +8,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import numpy as np
 
+from src.config import RESULTS_DIR
 from src.data.loader import load_split
 from src.features.skills import is_exact_match
 from src.metrics import evaluate_all
@@ -23,12 +25,11 @@ def score_cv_keywords(must_skills, nice_skills, cv_text):
     return 100.0 * (matched_w / total_w)
 
 
-def run_e1():
-    print("=== CHẠY THỰC NGHIỆM E1: BASELINE KEYWORD MATCH ===")
-    df_val = load_split("val")
-    df_test = load_split("test")
+def run_e1(seed: int) -> dict:
+    print(f"=== CHẠY THỰC NGHIỆM E1: BASELINE KEYWORD MATCH (Seed {seed}) ===")
+    df_val = load_split("val", seed)
+    df_test = load_split("test", seed)
 
-    print(f"Tính điểm từ khóa trên tập Val ({len(df_val)} mẫu)...")
     val_scores = np.array([
         score_cv_keywords(
             r["jd_entities"].get("must_have_skills", []),
@@ -39,11 +40,9 @@ def run_e1():
     ], dtype=np.float32)
 
     y_val = df_val["label"].to_numpy()
-    print("Tìm ngưỡng tối ưu (t1, t2) trên tập Val...")
     best_t1, best_t2, val_f1 = search_best_thresholds(val_scores, y_val)
-    print(f"Ngưỡng tối ưu E1: t1={best_t1:.1f}, t2={best_t2:.1f} (Macro-F1 Val: {val_f1:.4f})")
+    print(f"Ngưỡng tối ưu E1 (seed {seed}): t1={best_t1:.1f}, t2={best_t2:.1f} (Macro-F1 Val: {val_f1:.4f})")
 
-    print(f"Đánh giá trên tập Test ({len(df_test)} mẫu)...")
     test_scores = np.array([
         score_cv_keywords(
             r["jd_entities"].get("must_have_skills", []),
@@ -67,7 +66,7 @@ def run_e1():
 
     headers = ["Mô hình", "Ngưỡng (t1, t2)", "QWK", "Macro-F1", "MAE", "Spearman", "NDCG@10"]
     row = [
-        "E1: Baseline Keyword",
+        f"E1: Baseline Keyword (seed {seed})",
         f"({best_t1:.0f}, {best_t2:.0f})",
         f"{metrics['qwk']:.4f}",
         f"{metrics['macro_f1']:.4f}",
@@ -78,13 +77,17 @@ def run_e1():
     md_table = to_markdown_table(headers, [row])
     print("\n" + md_table + "\n")
 
-    out_dir = PROJECT_ROOT / "artifacts" / "results"
+    out_dir = RESULTS_DIR / f"seed{seed}"
     out_dir.mkdir(parents=True, exist_ok=True)
-    save_json(out_dir / "e1.json", {"thresholds": (best_t1, best_t2), "metrics": metrics})
+    res = {"seed": seed, "thresholds": (best_t1, best_t2), "metrics": metrics}
+    save_json(out_dir / "e1.json", res)
     with open(out_dir / "e1.md", "w", encoding="utf-8") as f:
-        f.write("# Kết quả Thực nghiệm E1: Baseline Keyword\n\n" + md_table + "\n")
-    print(f"Đã lưu kết quả vào {out_dir}/e1.json và e1.md")
+        f.write(f"# Kết quả Thực nghiệm E1: Baseline Keyword (Seed {seed})\n\n" + md_table + "\n")
+    return res
 
 
 if __name__ == "__main__":
-    run_e1()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--seed", type=int, required=True, help="Random seed phân chia dữ liệu.")
+    args = parser.parse_args()
+    run_e1(args.seed)

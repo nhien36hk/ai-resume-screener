@@ -11,7 +11,7 @@ from sentence_transformers import SentenceTransformer
 import torch
 
 from src.config import CHUNK_OVERLAP, CHUNK_SIZE, DEFAULT_EMBEDDING_MODEL, MAX_SEQ_LENGTH
-from src.data.loader import load_split
+from src.data.loader import load_all
 from src.features.skills import SKILL_SYNONYMS
 from src.features.text import chunk_text
 from src.scoring import (
@@ -85,10 +85,9 @@ def run_e6():
 
     encoder = SentenceTransformer(DEFAULT_EMBEDDING_MODEL)
     encoder.max_seq_length = MAX_SEQ_LENGTH
-    df_test = load_split("test")
-
-    jd_sample = df_test.iloc[0]
-    unique_cvs_df = df_test.drop_duplicates(subset=["resume_text"]).copy()
+    df_all = load_all()
+    jd_sample = df_all.iloc[0]
+    unique_cvs_df = df_all.drop_duplicates(subset=["resume_text"]).copy()
 
     percentile_p5, percentile_p95 = 0.30, 0.80
     weights = {"sem": 0.2, "skill": 0.2, "exp": 0.2, "edu": 0.2, "cert": 0.2}

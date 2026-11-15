@@ -120,18 +120,20 @@ def test_run_task_sends_one_batched_call_per_chunk():
 
 def test_merge_strict_stops_when_entities_are_missing(tmp_path):
     merge = load_script("03_merge_splits")
+    raw_file = tmp_path / "raw.parquet"
+    out_file = tmp_path / "all.jsonl"
     pd.DataFrame([{
         "resume_text": "cv text", "job_description_text": "jd text",
         "label": 1, "job_id": "JD_0000", "label_text": "Potential Fit",
-    }]).to_parquet(tmp_path / "val.parquet")
+    }]).to_parquet(raw_file)
     jd_cache = {"JD_0000": {**JD_OK, "_schema_version": SCHEMA_VERSION}}
 
     with pytest.raises(SystemExit):
-        merge.process_split("val", tmp_path, jd_cache, {})
-    assert not (tmp_path / "val.jsonl").exists()
+        merge.merge_all(raw_file, out_file, jd_cache=jd_cache, cv_cache={}, strict=True)
+    assert not out_file.exists()
 
     cv_cache = {compute_text_hash("cv text"): {**CV_OK, "_schema_version": SCHEMA_VERSION}}
-    assert merge.process_split("val", tmp_path, jd_cache, cv_cache)["kept"] == 1
+    assert merge.merge_all(raw_file, out_file, jd_cache=jd_cache, cv_cache=cv_cache, strict=True)["kept"] == 1
 
 
 def test_evidence_and_segments():

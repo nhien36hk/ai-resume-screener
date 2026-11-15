@@ -1,3 +1,4 @@
+import argparse
 from pathlib import Path
 import sys
 
@@ -17,7 +18,7 @@ from sentence_transformers.evaluation import EmbeddingSimilarityEvaluator
 from sentence_transformers.losses import CosineSimilarityLoss
 from transformers import EarlyStoppingCallback
 
-from src.config import DEFAULT_EMBEDDING_MODEL, MAX_SEQ_LENGTH
+from src.config import ARTIFACTS_DIR, DEFAULT_EMBEDDING_MODEL, FEATURES_DIR, MAX_SEQ_LENGTH, RESULTS_DIR
 from src.data.loader import load_split
 from src.features.text import prepare_finetune_text
 from src.pipeline import load_feature_tables
@@ -28,7 +29,6 @@ TARGET_MAP = {0: 0.0, 1: 0.5, 2: 1.0}
 
 
 def build_pair_dataset(df: pd.DataFrame) -> Dataset:
-    # spec mục 7: cắt 256 token -> model tự cắt ở max_seq_length, không cắt theo ký tự
     jd_texts = [str(t) for t in df["job_description_text"]]
     cv_texts = [prepare_finetune_text(str(t)) for t in df["resume_text"]]
     scores = [TARGET_MAP.get(int(lbl), 0.0) for lbl in df["label"]]
@@ -60,11 +60,12 @@ def train_e5(train_df, val_df, output_dir):
         fp16=True,
         eval_strategy="epoch",
         save_strategy="epoch",
+        save_total_limit=1,
         load_best_model_at_end=True,
-        metric_for_best_model="eval_val_spearman_cosine",
-        save_total_limit=2,
-        seed=42,
+        metric_for_best_model="val_spearman_cosine",
+        greater_is_better=True,
         logging_steps=50,
+        report_to="none",
     )
 
     trainer = SentenceTransformerTrainer(
@@ -82,42 +83,41 @@ def train_e5(train_df, val_df, output_dir):
     return model
 
 
-def run_e5():
-    print("=== CHẠY THỰC NGHIỆM E5: FINE-TUNING MINILM-L12-V2 (M5) ===")
-    df_train = load_split("train")
-    df_val = load_split("val")
-    df_test = load_split("test")
+def run_e5(seed: int) -> dict:
+    print(f"=== CHẠY THỰC NGHIỆM E5: FINE-TUNING MINILM-L12-V2 (Seed {seed}) ===")
+    df_train = load_split("train", seed)
+    df_val = load_split("val", seed)
+    df_test = load_split("test", seed)
 
-    model_dir = PROJECT_ROOT / "artifacts" / "models" / "e5_finetuned"
+    model_dir = ARTIFACTS_DIR / "models" / "e5_finetuned" / f"seed{seed}"
     if (model_dir / "config.json").exists():
         print(f"Nạp mô hình đã fine-tune có sẵn từ {model_dir}...")
         model = SentenceTransformer(str(model_dir))
     else:
-        print("Bắt đầu huấn luyện Fine-tune mô hình MiniLM...")
+        print(f"Bắt đầu huấn luyện Fine-tune mô hình MiniLM cho seed {seed}...")
         model = train_e5(df_train, df_val, model_dir)
 
-    tables = load_feature_tables(PROJECT_ROOT / "artifacts" / "features" / "minilm_finetuned", model)
-    col_chunk = "sim_chunk_200" if "sim_chunk_200" in tables["train"].columns else "sim_chunk"
-    percentile_p5, percentile_p95 = (float(v) for v in np.percentile(tables["train"][col_chunk], [5, 95]))
+    feat_dir = FEATURES_DIR / "minilm_finetuned" / f"seed{seed}"
+    tables = load_feature_tables(feat_dir, model, seed)
+    percentile_p5, percentile_p95 = (float(v) for v in np.percentile(tables["train"]["sim_chunk_200"], [5, 95]))
 
-    # Tune lại toàn bộ theo đúng giao thức mô hình kết hợp (percentile_p5, percentile_p95 trên Train; skill_threshold, weights, thresholds trên Val)
-    print("\nTối ưu siêu tham số trên tập Val cho mô hình M5...")
+    print(f"\nTối ưu siêu tham số trên tập Val cho mô hình M5 (seed {seed})...")
     best_config = tune_combined_model(tables["val"], percentile_p5, percentile_p95)
     threshold = best_config.get("skill_threshold", best_config.get("tau", 0.7))
     m5_metrics, _ = evaluate_combined_variant(tables["val"], tables["test"], percentile_p5, percentile_p95, threshold, best_config["weights"])
-    print(f"-> M5 tối ưu: skill_threshold={threshold}, t=({best_config['t1']:.0f}, {best_config['t2']:.0f})")
+    print(f"-> M5 tối ưu (seed {seed}): skill_threshold={threshold}, t=({best_config['t1']:.0f}, {best_config['t2']:.0f})")
     best_config = {**best_config, "weights": dict(zip(CRITERIA, best_config["weights"].tolist())), "scaler": (percentile_p5, percentile_p95)}
 
-    e4_path = PROJECT_ROOT / "artifacts" / "results" / "e4.json"
+    e4_path = RESULTS_DIR / f"seed{seed}" / "e4.json"
     e4_data = load_json(e4_path, {})
-    m4_metrics = next((r for r in e4_data.get("results", []) if "Full" in r["name"]), None)
+    m4_metrics = next((r for r in e4_data.get("results", []) if "Full" in r.get("variant", r.get("name", ""))), None)
 
     headers = ["Mô hình", "QWK", "Δ QWK", "Macro-F1", "Δ F1", "MAE", "Spearman", "NDCG@10"]
     rows = []
 
     if m4_metrics:
         rows.append([
-            "M4: Pretrained MiniLM",
+            f"M4: Pretrained MiniLM (seed {seed})",
             f"{m4_metrics['qwk']:.4f}",
             "-",
             f"{m4_metrics['macro_f1']:.4f}",
@@ -135,7 +135,7 @@ def run_e5():
         d_f1_str = "-"
 
     rows.append([
-        "M5: Fine-tuned MiniLM",
+        f"M5: Fine-tuned MiniLM (seed {seed})",
         f"{m5_metrics['qwk']:.4f}",
         d_qwk_str,
         f"{m5_metrics['macro_f1']:.4f}",
@@ -148,13 +148,17 @@ def run_e5():
     md_table = to_markdown_table(headers, rows)
     print("\n" + md_table + "\n")
 
-    out_dir = PROJECT_ROOT / "artifacts" / "results"
+    out_dir = RESULTS_DIR / f"seed{seed}"
     out_dir.mkdir(parents=True, exist_ok=True)
-    save_json(out_dir / "e5.json", {"config": best_config, "metrics": m5_metrics})
+    res = {"seed": seed, "config": best_config, "metrics": m5_metrics}
+    save_json(out_dir / "e5.json", res)
     with open(out_dir / "e5.md", "w", encoding="utf-8") as f:
-        f.write("# Kết quả Thực nghiệm E5: So sánh M4 Pretrained vs M5 Fine-tuned\n\n" + md_table + "\n")
-    print(f"Đã lưu kết quả vào {out_dir}/e5.json và e5.md")
+        f.write(f"# Kết quả Thực nghiệm E5: So sánh M4 Pretrained vs M5 Fine-tuned (Seed {seed})\n\n" + md_table + "\n")
+    return res
 
 
 if __name__ == "__main__":
-    run_e5()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--seed", type=int, required=True, help="Random seed phân chia dữ liệu.")
+    args = parser.parse_args()
+    run_e5(args.seed)

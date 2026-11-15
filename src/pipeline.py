@@ -6,8 +6,9 @@ import pandas as pd
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
-from src.data.loader import load_split
+from src.data.loader import load_all, split_ids
 from src.config import (
+    ALL_PAIRS_PATH,
     CHUNK_OVERLAP,
     CHUNK_SIZE,
     DEFAULT_EMBEDDING_MODEL,
@@ -158,14 +159,17 @@ def build_feature_table(
     return pd.DataFrame(rows)
     
 
-def load_feature_tables(feat_dir: Path, model: SentenceTransformer) -> Dict[str, pd.DataFrame]:
-    """Bảng feature là cache duy nhất: có parquet thì đọc, chưa có thì tính rồi ghi."""
+def load_feature_tables(feat_dir: Path, model: SentenceTransformer, seed: int) -> Dict[str, pd.DataFrame]:
+    """Bảng feature là cache duy nhất: all.parquet dùng chung mọi seed, cắt theo split_ids(seed)."""
     feat_dir.mkdir(parents=True, exist_ok=True)
-    tables = {}
-    for split in ("train", "val", "test"):
-        path = feat_dir / f"{split}.parquet"
-        if not path.exists():
-            print(f"Tính bảng feature tập {split} -> {path}")
-            build_feature_table(load_split(split), model).to_parquet(path, index=False)
-        tables[split] = pd.read_parquet(path)
-    return tables
+    all_parquet = feat_dir / "all.parquet"
+    if not all_parquet.exists() or (ALL_PAIRS_PATH.exists() and all_parquet.stat().st_mtime < ALL_PAIRS_PATH.stat().st_mtime):
+        print(f"Tính bảng feature toàn bộ -> {all_parquet}")
+        build_feature_table(load_all(), model).to_parquet(all_parquet, index=False)
+
+    df_feat = pd.read_parquet(all_parquet)
+    splits = split_ids(seed)
+    return {
+        name: df_feat[df_feat["job_id"].isin(set(jds))].reset_index(drop=True)
+        for name, jds in splits.items()
+    }

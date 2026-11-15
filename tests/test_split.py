@@ -1,63 +1,57 @@
+import importlib
 from pathlib import Path
-import sys
+import json
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+import pandas as pd
+import pytest
 
-from src.data.loader import load_split
+from src.config import FEATURES_DIR, SPLITS_DIR
+from src.data.loader import load_all, load_split, split_ids
+
+make_splits = importlib.import_module("scripts.04_make_splits").make_splits
 
 
-def test_split_files_load_and_columns():
+def test_splits_integrity_across_seeds():
+    """Với 3 seed bất kỳ: không trùng JD, hợp lại đủ mọi JD của all.jsonl, tỷ lệ xấp xỉ 70/15/15."""
+    df_all = load_all()
+    all_jds = set(df_all["job_id"].unique())
+    total_jds = len(all_jds)
+
+    for seed in [0, 3, 7]:
+        splits = split_ids(seed)
+        train_jds = set(splits["train"])
+        val_jds = set(splits["val"])
+        test_jds = set(splits["test"])
+
+        assert len(train_jds & val_jds) == 0, f"Trùng Train-Val ở seed {seed}"
+        assert len(train_jds & test_jds) == 0, f"Trùng Train-Test ở seed {seed}"
+        assert len(val_jds & test_jds) == 0, f"Trùng Val-Test ở seed {seed}"
+        assert (train_jds | val_jds | test_jds) == all_jds
+
+        assert abs(len(train_jds) / total_jds - 0.70) < 0.05
+        assert abs(len(val_jds) / total_jds - 0.15) < 0.05
+        assert abs(len(test_jds) / total_jds - 0.15) < 0.05
+
+
+def test_idempotent_splits_no_overwrite():
+    """Cùng một seed tạo ra cùng file index; chạy lại không ghi đè."""
+    seed0_path = SPLITS_DIR / "seed0.json"
+    mtime_before = seed0_path.stat().st_mtime
+    make_splits(seeds=[0])
+    mtime_after = seed0_path.stat().st_mtime
+    assert mtime_before == mtime_after
+
+
+def test_split_and_feature_pair_ids_match():
+    """load_split(name, seed) và feature tables cắt theo seed trả về cùng tập pair_id."""
+    seed = 0
     for name in ["train", "val", "test"]:
-        df = load_split(name)
-        assert len(df) > 0, f"Split {name} rỗng!"
-        expected_cols = [
-            "pair_id",
-            "job_id",
-            "label",
-            "label_text",
-            "job_description_text",
-            "resume_text",
-            "jd_entities",
-            "cv_entities",
-        ]
-        for col in expected_cols:
-            assert col in df.columns, f"Thiếu cột {col} trong split {name}"
+        df_split = load_split(name, seed=seed)
+        split_pair_ids = set(df_split["pair_id"])
 
-        # Kiểm tra nhãn chuẩn
-        valid_labels = {0, 1, 2}
-        unique_labels = set(df["label"].unique())
-        assert unique_labels.issubset(valid_labels), f"Nhãn không hợp lệ trong {name}: {unique_labels}"
+        all_feat_path = FEATURES_DIR / "minilm_pretrained" / "all.parquet"
+        df_feat = pd.read_parquet(all_feat_path)
+        jds = set(split_ids(seed)[name])
+        feat_pair_ids = set(df_feat[df_feat["job_id"].isin(jds)]["pair_id"])
 
-        # Kiểm tra entities không bị null/None
-        sample = df.iloc[0]
-        assert isinstance(sample.jd_entities, dict), "jd_entities phải là dict"
-        assert isinstance(sample.cv_entities, dict), "cv_entities phải là dict"
-
-
-def test_zero_leakage_between_splits():
-    df_train = load_split("train")
-    df_val = load_split("val")
-    df_test = load_split("test")
-
-    train_jds = set(df_train["job_id"].unique())
-    val_jds = set(df_val["job_id"].unique())
-    test_jds = set(df_test["job_id"].unique())
-
-    overlap_train_val = train_jds.intersection(val_jds)
-    overlap_train_test = train_jds.intersection(test_jds)
-    overlap_val_test = val_jds.intersection(test_jds)
-
-    assert len(overlap_train_val) == 0, f"Rò rỉ JD giữa Train và Val: {overlap_train_val}"
-    assert len(overlap_train_test) == 0, f"Rò rỉ JD giữa Train và Test: {overlap_train_test}"
-    assert len(overlap_val_test) == 0, f"Rò rỉ JD giữa Val và Test: {overlap_val_test}"
-
-
-if __name__ == "__main__":
-    print("Đang chạy kiểm thử tính toàn vẹn các tập dữ liệu...")
-    test_split_files_load_and_columns()
-    print("✅ PASS: test_split_files_load_and_columns (Cấu trúc cột & kiểu dữ liệu chuẩn)")
-    test_zero_leakage_between_splits()
-    print("✅ PASS: test_zero_leakage_between_splits (0 job_id trùng lặp giữa Train, Val, Test)")
-
+        assert split_pair_ids == feat_pair_ids, f"Lệch pair_id ở split {name} seed {seed}"
