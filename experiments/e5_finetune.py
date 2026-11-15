@@ -105,7 +105,8 @@ def run_e5(seed: int) -> dict:
     best_config = find_best_hyperparams(tables["val"], percentile_p5, percentile_p95)
     weights = best_config["weights"]
     threshold = best_config.get("skill_threshold", best_config.get("tau", 0.7))
-    print(f"-> M5 tối ưu (seed {seed}): skill_threshold={threshold}, w={dict(zip(CRITERIA, np.round(weights, 2).tolist()))}, t=({best_config['t1']:.0f}, {best_config['t2']:.0f})")
+    must_ratio = best_config.get("must_ratio", 1.0)
+    print(f"-> M5 tối ưu (seed {seed}): skill_threshold={threshold}, must_ratio={must_ratio}, w={dict(zip(CRITERIA, np.round(weights, 2).tolist()))}, t=({best_config['t1']:.0f}, {best_config['t2']:.0f})")
 
     def without(name):
         return np.where(np.array(CRITERIA) == name, 0.0, weights)
@@ -120,7 +121,7 @@ def run_e5(seed: int) -> dict:
     print(f"\nĐánh giá Full M5 và các biến thể Ablation trên tập Test (seed {seed})...")
     results = []
     for name, w_variant, skill_rule, exp_rule in variants:
-        m, (t1, t2) = tune_and_test_variant(tables["val"], tables["test"], percentile_p5, percentile_p95, threshold, w_variant, skill_rule, exp_rule)
+        m, (t1, t2) = tune_and_test_variant(tables["val"], tables["test"], percentile_p5, percentile_p95, threshold, w_variant, skill_rule, exp_rule, must_ratio=must_ratio)
         results.append({"name": f"{name} (seed {seed})", "variant": name, "thresholds": (t1, t2), **m})
 
     full_m5 = results[0]

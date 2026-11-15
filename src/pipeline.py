@@ -108,7 +108,7 @@ def precompute_all_features(
         cv_skill_embeddings = cv_data["cv_skill_embeddings"]
 
         skill_scores = {}
-        must_misses = {}
+        miss_counts = {}
         for skill_threshold in SKILL_THRESHOLDS:
             score_skill, miss_count = compute_skill_score(
                 must_skills, nice_skills, cv_skills,
@@ -118,8 +118,8 @@ def precompute_all_features(
                 skill_threshold=skill_threshold,
                 synonyms=SKILL_SYNONYMS,
             )
-            skill_scores[f"skill_{skill_threshold}"] = score_skill
-            must_misses[f"must_miss_{skill_threshold}"] = miss_count
+            skill_scores[f"score_skill_{skill_threshold}"] = score_skill
+            miss_counts[f"miss_count_{skill_threshold}"] = miss_count
 
         cv_years_exp = float(cv_entities.get("total_years_experience", 0.0))
         jd_min_years_exp = float(jd_entities.get("min_years_experience", 0.0))
@@ -145,8 +145,8 @@ def precompute_all_features(
             "sim_chunk_200": sim_chunk_200,
             "sim_truncated_256": sim_truncated_256,
             **skill_scores,
-            **must_misses,
-            "must_total": len(must_skills),
+            **miss_counts,
+            "total_must_skills": len(must_skills),
             "score_experience": score_experience,
             "score_education": score_education,
             "score_certificate": score_certificate,

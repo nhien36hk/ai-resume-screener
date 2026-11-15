@@ -28,7 +28,8 @@ def run_e4(seed: int) -> dict:
     print(f"\n1. Tìm skill_threshold, trọng số weights và ngưỡng (t1, t2) trên tập Val (seed {seed})...")
     cfg = find_best_hyperparams(df_val, percentile_p5, percentile_p95)
     weights = cfg["weights"]
-    print(f"-> Chọn skill_threshold={cfg['skill_threshold']}, w={dict(zip(CRITERIA, np.round(weights, 2).tolist()))}, t=({cfg['t1']:.0f}, {cfg['t2']:.0f})")
+    must_ratio = cfg.get("must_ratio", 1.0)
+    print(f"-> Chọn skill_threshold={cfg['skill_threshold']}, must_ratio={must_ratio}, w={dict(zip(CRITERIA, np.round(weights, 2).tolist()))}, t=({cfg['t1']:.0f}, {cfg['t2']:.0f})")
 
     def without(name):
         return np.where(np.array(CRITERIA) == name, 0.0, weights)
@@ -45,7 +46,7 @@ def run_e4(seed: int) -> dict:
     print(f"\n2. Đánh giá Full M4 và các biến thể Ablation trên tập Test (seed {seed})...")
     results = []
     for name, w_variant, skill_rule, exp_rule in variants:
-        m, (t1, t2) = tune_and_test_variant(df_val, df_test, percentile_p5, percentile_p95, cfg["skill_threshold"], w_variant, skill_rule, exp_rule)
+        m, (t1, t2) = tune_and_test_variant(df_val, df_test, percentile_p5, percentile_p95, cfg["skill_threshold"], w_variant, skill_rule, exp_rule, must_ratio=must_ratio)
         results.append({"name": f"{name} (seed {seed})", "variant": name, "thresholds": (t1, t2), **m})
 
     full = results[0]

@@ -59,18 +59,45 @@ def test_prepare_criteria_inputs():
     import pandas as pd
     from src.tuning import prepare_criteria_inputs
 
-    df = pd.DataFrame([{
+    # Kiểm tra với tên cột mới chuẩn
+    df_new = pd.DataFrame([{
         "sim_chunk_200": 0.8,
-        "skill_0.7": 85.0,
+        "score_skill_0.7": 85.0,
         "score_experience": 90.0,
         "score_education": 100.0,
         "score_certificate": np.nan,
-        "must_miss_0.7": 0,
+        "miss_count_0.7": 0,
+        "total_must_skills": 5,
         "has_insufficient_exp": False,
     }])
-    scores, mask, skill_fail, exp_fail = prepare_criteria_inputs(df, skill_threshold=0.7, percentile_p5=0.2, percentile_p95=0.8)
+    scores, mask, skill_fail, exp_fail = prepare_criteria_inputs(df_new, skill_threshold=0.7, percentile_p5=0.2, percentile_p95=0.8)
     assert scores.shape == (1, 5)
     assert mask.shape == (1, 5)
     assert mask[0, 4] == 0.0
     assert not skill_fail[0]
     assert not exp_fail[0]
+
+    # Kiểm tra các ngưỡng must_ratio
+    df_must = pd.DataFrame([
+        {"sim_chunk_200": 0.5, "score_skill_0.7": 80.0, "score_experience": 80.0, "score_education": 80.0, "score_certificate": 80.0,
+         "miss_count_0.7": 1, "total_must_skills": 4, "has_insufficient_exp": False},  # cov = 3/4 = 0.75
+    ])
+    _, _, fail_0, _ = prepare_criteria_inputs(df_must, 0.7, 0.2, 0.8, must_ratio=0.0)
+    assert not fail_0[0]
+
+    _, _, fail_half, _ = prepare_criteria_inputs(df_must, 0.7, 0.2, 0.8, must_ratio=0.5)
+    assert not fail_half[0]  # 0.75 >= 0.5 -> Đạt
+
+    _, _, fail_strict, _ = prepare_criteria_inputs(df_must, 0.7, 0.2, 0.8, must_ratio=0.8)
+    assert fail_strict[0]  # 0.75 < 0.8 -> Bị phạt
+
+    _, _, fail_1, _ = prepare_criteria_inputs(df_must, 0.7, 0.2, 0.8, must_ratio=1.0)
+    assert fail_1[0]  # miss=1 -> Bị phạt
+
+    # Kiểm tra tương thích ngược với tên cột cũ
+    df_old = pd.DataFrame([{
+        "sim_chunk_200": 0.8, "skill_0.7": 85.0, "score_experience": 90.0, "score_education": 100.0,
+        "score_certificate": 80.0, "must_miss_0.7": 0, "must_total": 3, "has_insufficient_exp": False,
+    }])
+    _, _, old_fail, _ = prepare_criteria_inputs(df_old, 0.7, 0.2, 0.8)
+    assert not old_fail[0]

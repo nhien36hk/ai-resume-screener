@@ -4,7 +4,7 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from src.config import DEFAULT_THRESHOLDS, SKILL_THRESHOLDS
+from src.config import DEFAULT_THRESHOLDS, MUST_HAVE_RATIOS, SKILL_THRESHOLDS
 from src.metrics import compute_all_metrics, compute_macro_f1, compute_qwk
 from src.scoring import scale_p5_p95
 
@@ -35,17 +35,28 @@ def apply_must_have_penalty(scores: np.ndarray, failed: np.ndarray, t2: float) -
     return np.where(failed, np.minimum(scores, t2 - 1.0), scores)
 
 
-def prepare_criteria_inputs(feat: pd.DataFrame, skill_threshold: float, percentile_p5: float, percentile_p95: float, sim_col: str = "sim_chunk_200"):
-    """Từ bảng feature: criteria_scores_matrix [n×5], criteria_mask_matrix [n×5], cờ thiếu must-skill, cờ kinh nghiệm < 50%."""
+def prepare_criteria_inputs(
+    feat: pd.DataFrame,
+    skill_threshold: float,
+    percentile_p5: float,
+    percentile_p95: float,
+    sim_col: str = "sim_chunk_200",
+    must_ratio: float = 1.0,
+):
+    """Từ bảng feature: criteria_scores [n×5], criteria_mask [n×5], cờ thiếu must-skill, cờ thiếu kinh nghiệm."""
     sim_col_actual = sim_col if sim_col in feat.columns else ("sim_chunk" if "sim_chunk" in feat.columns else sim_col)
     sem = np.array([scale_p5_p95(s, percentile_p5, percentile_p95) for s in feat[sim_col_actual]])
-    others = feat[[f"skill_{skill_threshold}", "score_experience", "score_education", "score_certificate"]].apply(pd.to_numeric, errors="coerce").to_numpy(float)
-    criteria_scores_matrix = np.column_stack([sem, others])
-    criteria_mask_matrix = (~np.isnan(criteria_scores_matrix)).astype(float)
-    skill_fail = feat[f"must_miss_{skill_threshold}"].to_numpy() >= 1
+    skill_col = f"score_skill_{skill_threshold}" if f"score_skill_{skill_threshold}" in feat.columns else f"skill_{skill_threshold}"
+    miss_col = f"miss_count_{skill_threshold}" if f"miss_count_{skill_threshold}" in feat.columns else (f"must_miss_{skill_threshold}" if f"must_miss_{skill_threshold}" in feat.columns else f"num_missing_must_{skill_threshold}")
+    tot_col = "total_must_skills" if "total_must_skills" in feat.columns else ("must_total" if "must_total" in feat.columns else None)
+    others = feat[[skill_col, "score_experience", "score_education", "score_certificate"]].apply(pd.to_numeric, errors="coerce").to_numpy(float)
+    criteria_scores = np.column_stack([sem, others])
+    criteria_mask = (~np.isnan(criteria_scores)).astype(float)
+    tot = feat[tot_col].to_numpy(float) if tot_col else np.zeros(len(feat))
+    cov = 1.0 - feat[miss_col].to_numpy(float) / np.maximum(tot, 1.0)
+    skill_fail = (tot > 0) & (cov < must_ratio)
     exp_col = "has_insufficient_exp" if "has_insufficient_exp" in feat.columns else "exp_fail"
-    has_insufficient_exp = feat[exp_col].to_numpy(dtype=bool)
-    return np.nan_to_num(criteria_scores_matrix), criteria_mask_matrix, skill_fail, has_insufficient_exp
+    return np.nan_to_num(criteria_scores), criteria_mask, skill_fail, feat[exp_col].to_numpy(bool)
 
 
 def weighted_sum_scores(scores_matrix: np.ndarray, mask_matrix: np.ndarray, weights: np.ndarray) -> np.ndarray:
@@ -98,21 +109,39 @@ def search_best_thresholds(
     return best_t1, best_t2, best_f1
 
 
-def find_best_hyperparams(val_feat: pd.DataFrame, percentile_p5: float, percentile_p95: float, skill_thresholds=SKILL_THRESHOLDS) -> Dict:
-    """Tìm skill_threshold, bộ trọng số weights và ngưỡng (t1, t2) tối ưu trên tập Validation."""
+def find_best_hyperparams(
+    val_feat: pd.DataFrame,
+    percentile_p5: float,
+    percentile_p95: float,
+    skill_thresholds=SKILL_THRESHOLDS,
+    must_ratios=MUST_HAVE_RATIOS,
+) -> Dict:
+    """Tìm skill_threshold, must_ratio, trọng số weights và ngưỡng (t1, t2) tối ưu trên Val."""
     y = val_feat["label"].to_numpy()
     grid = generate_weight_grid()
     best = None
     for threshold in skill_thresholds:
-        criteria_scores, criteria_mask, skill_fail, exp_fail = prepare_criteria_inputs(val_feat, threshold, percentile_p5, percentile_p95)
-        failed = skill_fail | exp_fail
-        weights, _ = search_best_weights(criteria_scores, criteria_mask, y, failed, weight_grid=grid)
-        composite_scores = weighted_sum_scores(criteria_scores, criteria_mask, weights)
-        t1, t2, f1 = search_best_thresholds(composite_scores, y, failed)
-        qwk = compute_qwk(y, to_labels(apply_must_have_penalty(composite_scores, failed, t2), t1, t2))
-        print(f"  skill_threshold={threshold}: QWK={qwk:.4f}  Macro-F1={f1:.4f}  weights={np.round(weights, 2).tolist()}  thresholds=({t1:.0f}, {t2:.0f})")
-        if best is None or (qwk, f1) > (best["qwk"], best["f1"]):
-            best = {"skill_threshold": threshold, "tau": threshold, "weights": weights, "t1": t1, "t2": t2, "qwk": qwk, "f1": f1}
+        for ratio in must_ratios:
+            criteria_scores, criteria_mask, skill_fail, exp_fail = prepare_criteria_inputs(
+                val_feat, threshold, percentile_p5, percentile_p95, must_ratio=ratio
+            )
+            failed = skill_fail | exp_fail
+            weights, _ = search_best_weights(criteria_scores, criteria_mask, y, failed, weight_grid=grid)
+            composite_scores = weighted_sum_scores(criteria_scores, criteria_mask, weights)
+            t1, t2, f1 = search_best_thresholds(composite_scores, y, failed)
+            qwk = compute_qwk(y, to_labels(apply_must_have_penalty(composite_scores, failed, t2), t1, t2))
+            print(f"  threshold={threshold}, must_ratio={ratio}: QWK={qwk:.4f}  Macro-F1={f1:.4f}  weights={np.round(weights, 2).tolist()}  thresholds=({t1:.0f}, {t2:.0f})")
+            if best is None or (qwk, f1) > (best["qwk"], best["f1"]):
+                best = {
+                    "skill_threshold": threshold,
+                    "tau": threshold,
+                    "must_ratio": ratio,
+                    "weights": weights,
+                    "t1": t1,
+                    "t2": t2,
+                    "qwk": qwk,
+                    "f1": f1,
+                }
     return best
 
 
@@ -125,11 +154,14 @@ def tune_and_test_variant(
     weights: np.ndarray,
     skill_rule: bool = True,
     exp_rule: bool = True,
+    must_ratio: float = 1.0,
 ) -> Tuple[Dict[str, float], Tuple[float, float]]:
     """Tìm lại (t1, t2) trên Val cho biến thể (D3), rồi chấm Test một lần.
     skill_rule / exp_rule: bật điều kiện must-have tương ứng (ablation tắt điều kiện của tiêu chí bị bỏ)."""
     def scores(feat):
-        criteria_scores, criteria_mask, skill_fail, exp_fail = prepare_criteria_inputs(feat, skill_threshold, percentile_p5, percentile_p95)
+        criteria_scores, criteria_mask, skill_fail, exp_fail = prepare_criteria_inputs(
+            feat, skill_threshold, percentile_p5, percentile_p95, must_ratio=must_ratio
+        )
         return weighted_sum_scores(criteria_scores, criteria_mask, weights), (skill_fail & skill_rule) | (exp_fail & exp_rule)
 
     val_s, val_failed = scores(val_feat)
