@@ -106,6 +106,7 @@ def main():
     parser = argparse.ArgumentParser(description="Chạy thực nghiệm trên nhiều seed và tổng hợp kết quả.")
     parser.add_argument("--seeds", type=int, nargs="+", default=list(DEFAULT_SEEDS))
     parser.add_argument("--exps", nargs="+", choices=["e1", "e2", "e3", "e4", "e5", "e6"], default=["e1", "e2", "e3", "e4", "e5"])
+    parser.add_argument("--force", action="store_true", help="Chạy lại và ghi đè kết quả đã có thay vì bỏ qua.")
     args = parser.parse_args()
 
     active_seed_exps = [e for e in args.exps if e in EXP_RUNNERS]
@@ -114,15 +115,19 @@ def main():
         seed_dir.mkdir(parents=True, exist_ok=True)
         for exp_name in active_seed_exps:
             exp_file = seed_dir / f"{exp_name}.json"
-            if exp_file.exists():
+            if not args.force and exp_file.exists():
                 print(f"Bỏ qua {exp_name} seed {seed}: đã có {exp_file.name}")
                 continue
             runner = EXP_RUNNERS[exp_name]
             runner(seed)
 
     if "e6" in args.exps:
-        from experiments.e6_benchmark import run_e6
-        run_e6()
+        e6_file = RESULTS_DIR / "e6_benchmark.json"
+        if not args.force and e6_file.exists():
+            print(f"Bỏ qua e6: đã có {e6_file.name}")
+        else:
+            from experiments.e6_benchmark import run_e6
+            run_e6()
 
     summary_table = build_summary(args.seeds)
     print("\n" + "=" * 80)
