@@ -46,7 +46,18 @@ def merge_and_verify() -> None:
     elif all_parquet_path.exists():
         print(f">>> 2. File {all_parquet_path.name} đã tồn tại sẵn.")
     else:
-        raise FileNotFoundError(f"Không tìm thấy {all_parquet_path} hoặc bộ 3 file parquet trong {feat_dir}")
+        print(f">>> 2. Chưa có cache parquet trên server, đang tự động encode từ {ALL_PAIRS_PATH.name}...")
+        from sentence_transformers import SentenceTransformer
+        from src.config import DEFAULT_EMBEDDING_MODEL, MAX_SEQ_LENGTH
+        from src.pipeline import build_feature_table
+        
+        df_all = pd.read_json(ALL_PAIRS_PATH, lines=True)
+        model = SentenceTransformer(DEFAULT_EMBEDDING_MODEL)
+        model.max_seq_length = MAX_SEQ_LENGTH
+        feat_df = build_feature_table(df_all, model)
+        feat_dir.mkdir(parents=True, exist_ok=True)
+        feat_df.to_parquet(all_parquet_path, index=False)
+        print(f"    -> Đã tính toán và lưu {len(feat_df):,} dòng vào {all_parquet_path.name}")
 
     # 3. Kiểm tra 1-1 từng dòng giữa all.jsonl và all.parquet
     print(">>> 3. Đang đối soát 1-1 từng dòng giữa all.jsonl và all.parquet...")
@@ -72,3 +83,4 @@ def merge_and_verify() -> None:
 
 if __name__ == "__main__":
     merge_and_verify()
+
