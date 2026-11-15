@@ -58,10 +58,24 @@ CV_HEADERS = [
     "Languages", "Interests", "Affiliations", "Training",
 ]
 
-# Defaults
+# Defaults & Model Constants
 DEFAULT_DATASET_NAME = "cnamuangtoun/resume-job-description-fit"
 DEFAULT_VLLM_MODEL = "Qwen/Qwen3-14B-FP8"
 DEFAULT_NVIDIA_MODEL = "nvidia/nemotron-3.5-super-vl-120b-a12b"
+DEFAULT_EMBEDDING_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
+
+MAX_SEQ_LENGTH = 256
+CHUNK_SIZE = 200
+CHUNK_OVERLAP = 50  # dùng cho cả CV và JD (JD chunk: giảng viên đã đồng ý)
+EMBEDDING_BATCH_SIZE = 64
+
+SKILL_THRESHOLDS = (0.6, 0.7, 0.8)
+TAUS = SKILL_THRESHOLDS
+WEIGHT_STEP = 0.05
+WEIGHT_MIN = 0.05
+WEIGHT_MAX = 0.50
+DEFAULT_THRESHOLDS = (40, 70)
+
 DEFAULT_RANDOM_STATE = 42
 DEFAULT_TRAIN_RATIO = 0.70
 DEFAULT_VAL_RATIO = 0.15

@@ -17,7 +17,6 @@ from src.config import (
     JD_CACHE_PATH,
     PROCESSED_DIR,
 )
-from src.data.loader import get_split_path
 from src.data.schemas import CVEntities, JDEntities, is_current
 from src.utils import compute_text_hash, load_json, to_markdown_table
 
@@ -35,7 +34,7 @@ def process_split(
 
     df = pd.read_parquet(parquet_path)
     total_raw = len(df)
-    output_path = get_split_path(split_name, data_dir)
+    output_path = data_dir / f"{split_name}.jsonl"
 
     kept_records: List[Dict[str, Any]] = []
     dropped_count = 0

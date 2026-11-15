@@ -2,9 +2,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import random
-import time
-from typing import Any, List, Optional, Union
+from typing import Any, List, Union
 
 
 def compute_text_hash(text: str) -> str:
@@ -35,36 +33,6 @@ def save_json(file_path: Union[str, Path], data: Any, indent: int = 2) -> None:
         raise
 
 
-def set_seed(seed: int = 42) -> None:
-    random.seed(seed)
-    os.environ["PYTHONHASHSEED"] = str(seed)
-    try:
-        import numpy as np
-        np.random.seed(seed)
-    except ImportError:
-        pass
-    try:
-        import torch
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
-    except ImportError:
-        pass
-
-
-class Timer:
-    def __init__(self):
-        self.start_time: Optional[float] = None
-        self.elapsed: float = 0.0
-
-    def __enter__(self):
-        self.start_time = time.perf_counter()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.start_time is not None:
-            self.elapsed = time.perf_counter() - self.start_time
-
 
 def to_markdown_table(headers: List[str], rows: List[List[Any]]) -> str:
     if not headers or not rows:
@@ -81,3 +49,4 @@ def to_markdown_table(headers: List[str], rows: List[List[Any]]) -> str:
         for row in rows
     ]
     return "\n".join([header_line, separator_line] + data_lines)
+
