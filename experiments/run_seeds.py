@@ -70,8 +70,15 @@ def build_summary(seeds: list[int]) -> str:
 
         e5 = load_json(s_dir / "e5.json")
         if e5:
-            for k in METRIC_KEYS:
-                collected["M5: Fine-tuned MiniLM"][k].append(e5["metrics"].get(k, 0.0))
+            if "results" in e5:
+                for r in e5["results"]:
+                    var = r.get("variant", r.get("name", ""))
+                    var_clean = var.split(" (seed")[0]
+                    for k in METRIC_KEYS:
+                        collected[var_clean][k].append(r.get(k, 0.0))
+            else:
+                for k in METRIC_KEYS:
+                    collected["M5: Fine-tuned MiniLM"][k].append(e5["metrics"].get(k, 0.0))
 
     headers = ["Mô hình / Biến thể", "Số seed", "QWK", "Macro-F1", "MAE", "Spearman", "NDCG@10"]
     rows = []
