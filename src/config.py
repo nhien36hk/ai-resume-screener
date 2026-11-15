@@ -60,7 +60,7 @@ CV_HEADERS = [
 
 # Defaults & Model Constants
 DEFAULT_DATASET_NAME = "cnamuangtoun/resume-job-description-fit"
-DEFAULT_VLLM_MODEL = "Qwen/Qwen3-14B-FP8"
+DEFAULT_VLLM_MODEL = "/tmp/Qwen3-14B-FP8"
 DEFAULT_NVIDIA_MODEL = "nvidia/nemotron-3.5-super-vl-120b-a12b"
 DEFAULT_EMBEDDING_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
 
