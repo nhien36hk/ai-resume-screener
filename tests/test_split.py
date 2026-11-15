@@ -17,7 +17,7 @@ def test_splits_integrity_across_seeds():
     all_jds = set(df_all["job_id"].unique())
     total_jds = len(all_jds)
 
-    for seed in [0, 3, 7]:
+    for seed in [0, 2, 4]:
         splits = split_ids(seed)
         train_jds = set(splits["train"])
         val_jds = set(splits["val"])
