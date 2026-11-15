@@ -55,3 +55,15 @@ def test_split_and_feature_pair_ids_match():
         feat_pair_ids = set(df_feat[df_feat["job_id"].isin(jds)]["pair_id"])
 
         assert split_pair_ids == feat_pair_ids, f"Lệch pair_id ở split {name} seed {seed}"
+
+
+def test_all_jsonl_and_all_parquet_exact_alignment():
+    """Kiểm tra all.jsonl và all.parquet khớp 1-1 tuyệt đối: cùng thứ tự dòng, pair_id, job_id, label."""
+    df_jl = load_all()
+    df_pq = pd.read_parquet(FEATURES_DIR / "minilm_pretrained" / "all.parquet")
+
+    assert len(df_jl) == len(df_pq) == 8000
+    assert (df_jl["pair_id"].values == df_pq["pair_id"].values).all(), "Lệch pair_id giữa jsonl và parquet"
+    assert (df_jl["job_id"].astype(str).values == df_pq["job_id"].astype(str).values).all(), "Lệch job_id giữa jsonl và parquet"
+    assert (df_jl["label"].astype(int).values == df_pq["label"].astype(int).values).all(), "Lệch label giữa jsonl và parquet"
+
