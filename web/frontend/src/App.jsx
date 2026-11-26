@@ -119,7 +119,7 @@ export default function App() {
     try {
       const created = await createJob({ title: jdTitle, description: jdDesc });
       await refreshJobs(created.id);
-      setNotice({ type: "ok", text: `Đã phân tích và tạo vị trí "${created.title}". Bạn có thể rà soát lại các yêu cầu bắt buộc bên phải.` });
+      setNotice({ type: "ok", text: `Đã phân tích và tạo vị trí "${created.title}". Kiểm tra lại các yêu cầu bắt buộc ở cột bên phải trước khi tải hồ sơ.` });
     } catch (err) {
       setNotice({ type: "error", text: err.message });
     } finally {
@@ -144,7 +144,7 @@ export default function App() {
       });
       setActiveJob(updated);
       setReqs(updated.requirements || []);
-      setNotice({ type: "ok", text: "Đã lưu danh sách yêu cầu bắt buộc và cập nhật bộ đệm véc-tơ JD." });
+      setNotice({ type: "ok", text: "Đã lưu yêu cầu. Lần chấm tiếp theo sẽ dùng danh sách mới." });
     } catch (err) {
       setNotice({ type: "error", text: err.message });
     } finally {
@@ -184,7 +184,7 @@ export default function App() {
     try {
       const res = await evaluateJob(activeJob.id);
       setEvalTimings(res.timings || null);
-      const rk = await fetchRanking(activeJob.id, levelFilter);
+      const rk = await fetchRanking(activeJob.id);
       setRanking(rk.items || []);
       setStep(3);
       setNotice({
@@ -198,11 +198,9 @@ export default function App() {
     }
   }
 
-  async function handleFilterChange(lvl) {
+  // Lọc phía client để thước điểm luôn thấy đủ mọi ứng viên và giữ hạng gốc.
+  function handleFilterChange(lvl) {
     setLevelFilter(lvl);
-    if (!activeJob) return;
-    const rk = await fetchRanking(activeJob.id, lvl);
-    setRanking(rk.items || []);
   }
 
   async function handleOpenDetail(evalId) {
@@ -224,7 +222,7 @@ export default function App() {
       await deleteCandidate(candidateId);
       if (activeJob) {
         setCvs(await fetchJobCvs(activeJob.id));
-        const rk = await fetchRanking(activeJob.id, levelFilter);
+        const rk = await fetchRanking(activeJob.id);
         setRanking(rk.items || []);
       }
       if (detail && detail.candidate_id === candidateId) {
@@ -246,181 +244,182 @@ export default function App() {
     },
     { 0: 0, 1: 0, 2: 0 }
   );
+  const visibleRanking = levelFilter === "all" ? ranking : ranking.filter((r) => String(r.level) === levelFilter);
+  const t1 = health?.thresholds.t1 ?? 33;
+  const t2 = health?.thresholds.t2 ?? 67;
+  const readyCvCount = cvs.filter((c) => c.status === "ok").length;
+
+  const steps = [
+    { n: 1, label: "Yêu cầu vị trí", enabled: true },
+    { n: 2, label: "Hồ sơ", count: cvs.length, enabled: Boolean(activeJob) },
+    { n: 3, label: "Xếp hạng", count: ranking.length, enabled: Boolean(activeJob) },
+    { n: 4, label: "Chi tiết ứng viên", enabled: Boolean(detail) },
+  ];
 
   return (
     <div className="app-shell">
       <aside className="rail">
-        <div className="rail-brand">
-          <h1>Sàng lọc Hồ sơ</h1>
-          <p>Đánh giá phù hợp CV theo tiêu chí</p>
+        <div className="brand">
+          <span className="brand-name">Sàng lọc hồ sơ</span>
+          <span className="brand-sub">So khớp CV với mô tả công việc</span>
         </div>
-        <button className="rail-new-btn" onClick={startNewJob}>
-          + Tạo vị trí mới
+
+        <button className="btn-new" onClick={startNewJob}>
+          Tạo vị trí mới
         </button>
-        <div className="rail-section-title">Vị trí đã lưu ({jobs.length})</div>
-        <div className="rail-job-list">
-          {jobs.map((j) => (
-            <button
-              key={j.id}
-              className={`rail-job-item ${activeJob?.id === j.id ? "active" : ""}`}
-              onClick={() => {
-                openJob(j.id);
-                setStep(1);
-              }}
-            >
-              <span className="rail-job-title">{j.title}</span>
-              <span className="rail-job-meta num">{j.candidate_count} hồ sơ</span>
-            </button>
-          ))}
-        </div>
+
+        <h2 className="rail-heading">Vị trí đã lưu</h2>
+        {jobs.length === 0 ? (
+          <p className="rail-empty">Chưa có vị trí nào. Tạo vị trí đầu tiên để bắt đầu.</p>
+        ) : (
+          <ul className="job-index">
+            {jobs.map((j) => (
+              <li key={j.id}>
+                <button
+                  className={`job-entry ${activeJob?.id === j.id ? "is-active" : ""}`}
+                  aria-current={activeJob?.id === j.id ? "true" : undefined}
+                  onClick={() => {
+                    openJob(j.id);
+                    setStep(1);
+                  }}
+                >
+                  <span className="job-entry-title">{j.title}</span>
+                  <span className="job-entry-count num">{j.candidate_count}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+
         {health && (
-          <div className="rail-model-box">
-            <strong>{health.model_version}</strong>
-            <div className="num">Ngưỡng: t1 = {health.thresholds.t1}, t2 = {health.thresholds.t2}</div>
-            <div className="num">Luật bắt buộc: ρ = {health.must_ratio}, τ = {health.skill_threshold}</div>
-          </div>
+          <dl className="model-slip num">
+            <dt>Mô hình</dt>
+            <dd>{health.model_version}</dd>
+            <dt>Ngưỡng</dt>
+            <dd>t1 {health.thresholds.t1}, t2 {health.thresholds.t2}</dd>
+            <dt>Luật bắt buộc</dt>
+            <dd>ρ {health.must_ratio}, τ {health.skill_threshold}</dd>
+          </dl>
         )}
       </aside>
 
       <main className="workspace">
-        <nav className="step-bar" aria-label="Quy trình sàng lọc">
-          <button className={`step-tab ${step === 1 ? "active" : ""}`} onClick={() => setStep(1)}>
-            <span className="step-num">1</span> Yêu cầu vị trí
-          </button>
-          <button className={`step-tab ${step === 2 ? "active" : ""}`} disabled={!activeJob} onClick={() => setStep(2)}>
-            <span className="step-num">2</span> Tải hồ sơ ({cvs.length})
-          </button>
-          <button className={`step-tab ${step === 3 ? "active" : ""}`} disabled={!activeJob} onClick={() => setStep(3)}>
-            <span className="step-num">3</span> Bảng xếp hạng ({ranking.length})
-          </button>
-          <button className={`step-tab ${step === 4 ? "active" : ""}`} disabled={!detail} onClick={() => setStep(4)}>
-            <span className="step-num">4</span> Chi tiết ứng viên
-          </button>
+        <nav className="tabs" aria-label="Các bước sàng lọc">
+          {steps.map((s) => (
+            <button
+              key={s.n}
+              className={`tab ${step === s.n ? "is-active" : ""}`}
+              aria-current={step === s.n ? "step" : undefined}
+              disabled={!s.enabled}
+              onClick={() => setStep(s.n)}
+            >
+              <span className="tab-n num">{s.n}</span>
+              {s.label}
+              {s.count !== undefined && <span className="tab-count num">{s.count}</span>}
+            </button>
+          ))}
         </nav>
 
-        {notice && (
-          <div className={`notice-bar ${notice.type === "error" ? "notice-error" : "notice-ok"}`} role="status">
-            {notice.text}
-          </div>
-        )}
-
-        {step === 1 && (
-          <section>
-            <div className="page-header">
-              <div>
-                <h2>{activeJob ? activeJob.title : "Tạo vị trí tuyển dụng mới"}</h2>
-                <p>Nhập mô tả công việc để trích xuất yêu cầu, sau đó điều chỉnh danh sách kỹ năng bắt buộc trước khi chấm hồ sơ.</p>
-              </div>
-              {activeJob && (
-                <button className="btn-primary" onClick={() => setStep(2)}>
-                  Chuyển sang tải hồ sơ
-                </button>
-              )}
+        <div className="sheet">
+          {notice && (
+            <div className={`notice ${notice.type === "error" ? "notice-error" : "notice-ok"}`} role="status">
+              {notice.text}
+              <button className="notice-close" aria-label="Đóng thông báo" onClick={() => setNotice(null)}>×</button>
             </div>
+          )}
 
-            <div className="two-col">
-              <form className="panel" onSubmit={handleCreateJob}>
-                <h3 className="panel-title">Mô tả công việc (JD)</h3>
-                <div className="field">
-                  <label htmlFor="jd-title">Tên vị trí</label>
-                  <input
-                    id="jd-title"
-                    className="input"
-                    value={jdTitle}
-                    onChange={(e) => setJdTitle(e.target.value)}
-                    placeholder="Ví dụ: Chuyên viên Phân tích Dữ liệu"
-                  />
-                </div>
-                <div className="field">
-                  <label htmlFor="jd-desc">Nội dung yêu cầu chi tiết</label>
-                  <textarea
-                    id="jd-desc"
-                    className="textarea"
-                    value={jdDesc}
-                    onChange={(e) => setJdDesc(e.target.value)}
-                    placeholder="Dán mô tả nhiệm vụ, kỹ năng bắt buộc, ưu tiên, số năm kinh nghiệm và bằng cấp..."
-                  />
-                </div>
-                <div className="btn-row">
-                  <button type="submit" className="btn-primary" disabled={busy}>
-                    {busy ? "Đang phân tích..." : "Phân tích mô tả công việc"}
-                  </button>
-                  <button
-                    type="button"
-                    className="btn-secondary"
-                    onClick={() => {
-                      setJdTitle(SAMPLE_JD.title);
-                      setJdDesc(SAMPLE_JD.description);
-                    }}
-                  >
-                    Điền mẫu Data Analyst
-                  </button>
-                </div>
-              </form>
-
-              <div className="panel">
-                <h3 className="panel-title">Yêu cầu đã trích xuất</h3>
-                {!activeJob ? (
-                  <p style={{ color: "var(--ink-muted)" }}>
-                    Phân tích mô tả công việc ở cột bên trái để xem và chỉnh sửa danh sách yêu cầu bắt buộc.
+          {step === 1 && (
+            <section>
+              <header className="sheet-head">
+                <div>
+                  <h1>{activeJob ? activeJob.title : "Vị trí tuyển dụng mới"}</h1>
+                  <p className="lede">
+                    Dán mô tả công việc, hệ thống sẽ tách ra kỹ năng, số năm kinh nghiệm và bằng cấp. Bạn sửa lại danh sách trước khi chấm hồ sơ.
                   </p>
-                ) : (
-                  <>
-                    <div className="two-col" style={{ gap: 12, marginBottom: 14 }}>
-                      <div className="field" style={{ marginBottom: 0 }}>
-                        <label htmlFor="req-years">Số năm kinh nghiệm tối thiểu</label>
-                        <input
-                          id="req-years"
-                          type="number"
-                          step="0.5"
-                          min="0"
-                          className="input num"
-                          value={reqYears}
-                          onChange={(e) => setReqYears(e.target.value)}
-                        />
-                      </div>
-                      <div className="field" style={{ marginBottom: 0 }}>
-                        <label htmlFor="req-deg">Bậc học tối thiểu</label>
-                        <select id="req-deg" className="select" value={reqDegree} onChange={(e) => setReqDegree(e.target.value)}>
-                          <option value="none">Không yêu cầu</option>
-                          <option value="high_school">Trung học phổ thông</option>
-                          <option value="associate">Cao đẳng</option>
-                          <option value="bachelor">Đại học / Cử nhân</option>
-                          <option value="master">Thạc sĩ</option>
-                          <option value="phd">Tiến sĩ</option>
-                        </select>
-                      </div>
-                    </div>
+                </div>
+                {activeJob && (
+                  <button className="btn-primary" onClick={() => setStep(2)}>
+                    Tải hồ sơ
+                  </button>
+                )}
+              </header>
 
-                    <div className="btn-row" style={{ marginBottom: 12 }}>
-                      <input
-                        className="input"
-                        style={{ flex: 1 }}
-                        value={newSkillText}
-                        onChange={(e) => setNewSkillText(e.target.value)}
-                        placeholder="Thêm kỹ năng yêu cầu (ví dụ: postgresql)"
-                      />
-                      <button type="button" className="btn-secondary" onClick={handleAddSkillReq}>
-                        Thêm kỹ năng
-                      </button>
-                    </div>
+              <div className="split">
+                <form className="block" onSubmit={handleCreateJob}>
+                  <h2 className="block-title">Mô tả công việc</h2>
+                  <div className="field">
+                    <label htmlFor="jd-title">Tên vị trí</label>
+                    <input
+                      id="jd-title"
+                      className="input"
+                      value={jdTitle}
+                      onChange={(e) => setJdTitle(e.target.value)}
+                      placeholder="Ví dụ: Chuyên viên Phân tích Dữ liệu"
+                    />
+                  </div>
+                  <div className="field">
+                    <label htmlFor="jd-desc">Nội dung</label>
+                    <textarea
+                      id="jd-desc"
+                      className="textarea"
+                      value={jdDesc}
+                      onChange={(e) => setJdDesc(e.target.value)}
+                      placeholder="Nhiệm vụ, kỹ năng bắt buộc, kỹ năng ưu tiên, số năm kinh nghiệm, bằng cấp..."
+                    />
+                  </div>
+                  <div className="actions">
+                    <button type="submit" className="btn-primary" disabled={busy}>
+                      {busy ? "Đang phân tích..." : "Phân tích mô tả"}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-quiet"
+                      onClick={() => {
+                        setJdTitle(SAMPLE_JD.title);
+                        setJdDesc(SAMPLE_JD.description);
+                      }}
+                    >
+                      Dùng mẫu Data Analyst
+                    </button>
+                  </div>
+                </form>
 
-                    <table className="data-table">
-                      <thead>
-                        <tr>
-                          <th>Yêu cầu</th>
-                          <th>Loại</th>
-                          <th>Bắt buộc</th>
-                        </tr>
-                      </thead>
-                      <tbody>
+                <div className="block">
+                  <h2 className="block-title">Yêu cầu đã tách</h2>
+                  {!activeJob ? (
+                    <p className="muted">Sau khi phân tích, danh sách yêu cầu sẽ hiện ở đây để bạn chỉnh.</p>
+                  ) : (
+                    <>
+                      <div className="field-pair">
+                        <div className="field">
+                          <label htmlFor="req-years">Kinh nghiệm tối thiểu (năm)</label>
+                          <input
+                            id="req-years"
+                            type="number"
+                            step="0.5"
+                            min="0"
+                            className="input num"
+                            value={reqYears}
+                            onChange={(e) => setReqYears(e.target.value)}
+                          />
+                        </div>
+                        <div className="field">
+                          <label htmlFor="req-deg">Bậc học tối thiểu</label>
+                          <select id="req-deg" className="input" value={reqDegree} onChange={(e) => setReqDegree(e.target.value)}>
+                            <option value="none">Không yêu cầu</option>
+                            <option value="high_school">Trung học phổ thông</option>
+                            <option value="associate">Cao đẳng</option>
+                            <option value="bachelor">Đại học / Cử nhân</option>
+                            <option value="master">Thạc sĩ</option>
+                            <option value="phd">Tiến sĩ</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      <ul className="req-list">
                         {reqs.map((r, idx) => (
-                          <tr key={r.id || idx}>
-                            <td>{r.text}</td>
-                            <td>
-                              <span className="badge badge-neutral">{r.type}</span>
-                            </td>
-                            <td>
+                          <li key={r.id || idx} className={r.is_mandatory ? "is-must" : ""}>
+                            <label>
                               <input
                                 type="checkbox"
                                 checked={Boolean(r.is_mandatory)}
@@ -430,39 +429,67 @@ export default function App() {
                                   setReqs(next);
                                 }}
                               />
-                            </td>
-                          </tr>
+                              <span className="req-text">{r.text}</span>
+                            </label>
+                            <span className="req-type">{TYPE_LABELS[r.type] || r.type}</span>
+                          </li>
                         ))}
-                      </tbody>
-                    </table>
+                      </ul>
+                      <p className="hint">Đánh dấu = bắt buộc. Thiếu yêu cầu bắt buộc thì điểm bị giới hạn dưới ngưỡng Phù hợp.</p>
 
-                    <div className="btn-row" style={{ marginTop: 14 }}>
-                      <button type="button" className="btn-primary" disabled={busy} onClick={handleSaveRequirements}>
-                        Lưu yêu cầu bắt buộc
-                      </button>
-                    </div>
-                  </>
-                )}
+                      <form
+                        className="add-skill"
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          handleAddSkillReq();
+                        }}
+                      >
+                        <label htmlFor="new-skill" className="visually-hidden">Thêm kỹ năng</label>
+                        <input
+                          id="new-skill"
+                          className="input"
+                          value={newSkillText}
+                          onChange={(e) => setNewSkillText(e.target.value)}
+                          placeholder="Thêm kỹ năng, ví dụ postgresql"
+                        />
+                        <button type="submit" className="btn-quiet">Thêm</button>
+                      </form>
+
+                      <div className="actions">
+                        <button type="button" className="btn-primary" disabled={busy} onClick={handleSaveRequirements}>
+                          Lưu yêu cầu
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
               </div>
-            </div>
-          </section>
-        )}
+            </section>
+          )}
 
-        {step === 2 && activeJob && (
-          <section>
-            <div className="page-header">
-              <div>
-                <h2>Tải lên và trích xuất hồ sơ ứng viên</h2>
-                <p>Hỗ trợ nhiều tệp PDF có lớp chữ hoặc DOCX cùng lúc (tối đa 5 MB mỗi tệp). Tệp trùng nội dung được phát hiện tự động.</p>
-              </div>
-              <button className="btn-primary" disabled={busy || cvs.filter((c) => c.status === "ok").length === 0} onClick={handleEvaluateAll}>
-                {busy ? "Đang chấm điểm..." : "Chấm điểm hồ sơ"}
-              </button>
-            </div>
+          {step === 2 && activeJob && (
+            <section>
+              <header className="sheet-head">
+                <div>
+                  <h1>Hồ sơ cho {activeJob.title}</h1>
+                  <p className="lede">PDF có lớp chữ hoặc DOCX, tối đa 5 MB mỗi tệp. Tệp trùng nội dung sẽ bị bỏ qua. Email và số điện thoại được ẩn trước khi chấm.</p>
+                </div>
+                <button className="btn-primary" disabled={busy || readyCvCount === 0} onClick={handleEvaluateAll}>
+                  {busy ? "Đang chấm..." : `Chấm ${readyCvCount} hồ sơ`}
+                </button>
+              </header>
 
-            <div className="panel" style={{ marginBottom: 18 }}>
-              <div className="dropzone">
-                <p>Chọn một hoặc nhiều tệp CV định dạng PDF hoặc DOCX để tải vào vị trí <strong>{activeJob.title}</strong>.</p>
+              <label
+                className="drop"
+                htmlFor="cv-file-input"
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  handleFileSelect(e.dataTransfer.files);
+                }}
+              >
+                <span className="drop-main">Chọn tệp CV</span>
+                <span className="drop-sub">hoặc kéo nhiều tệp vào đây</span>
                 <input
                   id="cv-file-input"
                   type="file"
@@ -470,302 +497,348 @@ export default function App() {
                   multiple
                   onChange={(e) => handleFileSelect(e.target.files)}
                 />
-              </div>
+              </label>
 
               {uploadReport.length > 0 && (
-                <div className="notice-bar notice-warn">
-                  Kết quả tải gần nhất:{" "}
-                  {uploadReport.map((u) => `${u.file_name} (${u.status})`).join("; ")}
-                </div>
+                <p className="upload-report">
+                  Lần tải gần nhất: {uploadReport.map((u) => `${u.file_name} (${u.status})`).join("; ")}
+                </p>
               )}
 
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th>Mã</th>
-                    <th>Tên tệp</th>
-                    <th>Thông tin nhận diện (đã ẩn liên hệ)</th>
-                    <th>Trạng thái</th>
-                    <th>Ghi chú</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {cvs.length === 0 ? (
+              <div className="table-wrap">
+                <table className="ledger">
+                  <thead>
                     <tr>
-                      <td colSpan={5} style={{ color: "var(--ink-muted)" }}>
-                        Chưa có hồ sơ nào được tải lên cho vị trí này.
-                      </td>
+                      <th className="num">Mã</th>
+                      <th>Tệp</th>
+                      <th>Liên hệ (đã ẩn)</th>
+                      <th>Trạng thái</th>
                     </tr>
-                  ) : (
-                    cvs.map((c) => (
-                      <tr key={c.id}>
-                        <td className="num">#{c.id}</td>
-                        <td>{c.file_name}</td>
-                        <td>{c.masked_contact}</td>
-                        <td>
-                          <span className={`badge ${c.status === "ok" ? "badge-level-2" : "badge-level-0"}`}>
-                            {c.status === "ok" ? "Hợp lệ" : "Không đọc được"}
-                          </span>
-                        </td>
-                        <td style={{ color: "var(--ink-muted)" }}>{c.error_message || "Sẵn sàng chấm điểm"}</td>
+                  </thead>
+                  <tbody>
+                    {cvs.length === 0 ? (
+                      <tr>
+                        <td colSpan={4} className="muted">Chưa có hồ sơ nào. Chọn tệp ở trên để tải lên.</td>
                       </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        )}
-
-        {step === 3 && activeJob && (
-          <section>
-            <div className="page-header">
-              <div>
-                <h2>Bảng xếp hạng ứng viên</h2>
-                <p>Xếp hạng giảm dần theo điểm cuối cùng (phá hòa theo điểm tổng hợp thô). Vạch đứng trên dải điểm biểu thị ngưỡng Phù hợp t2 = {health?.thresholds.t2 || 67}.</p>
-              </div>
-              <button className="btn-primary" disabled={busy} onClick={handleEvaluateAll}>
-                Chấm lại toàn bộ
-              </button>
-            </div>
-
-            <div className="summary-strip">
-              <div className="summary-cell">
-                <div className="label">Hồ sơ đã chấm</div>
-                <div className="value num">{ranking.length}</div>
-              </div>
-              <div className="summary-cell">
-                <div className="label">Phù hợp (Good Fit)</div>
-                <div className="value num" style={{ color: "var(--fit-good-fg)" }}>{levelCounts[2] || 0}</div>
-              </div>
-              <div className="summary-cell">
-                <div className="label">Tiềm năng (Potential)</div>
-                <div className="value num" style={{ color: "var(--fit-potential-fg)" }}>{levelCounts[1] || 0}</div>
-              </div>
-              <div className="summary-cell">
-                <div className="label">Không phù hợp (No Fit)</div>
-                <div className="value num" style={{ color: "var(--fit-none-fg)" }}>{levelCounts[0] || 0}</div>
-              </div>
-            </div>
-
-            <div className="filter-pills">
-              {[
-                ["all", "Tất cả"],
-                ["2", "Phù hợp"],
-                ["1", "Tiềm năng"],
-                ["0", "Không phù hợp"],
-              ].map(([val, label]) => (
-                <button
-                  key={val}
-                  className={`filter-pill ${levelFilter === val ? "active" : ""}`}
-                  onClick={() => handleFilterChange(val)}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-
-            <div className="panel">
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th>Hạng</th>
-                    <th>Hồ sơ (đã ẩn liên hệ)</th>
-                    <th>Điểm tổng</th>
-                    <th>Mức phù hợp</th>
-                    <th>Ngữ nghĩa / Kỹ năng / KN</th>
-                    <th>Điều kiện bắt buộc</th>
-                    <th>Thao tác</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {ranking.map((item) => {
-                    const capped = item.must_have_failed && item.must_have_failed.length > 0 && item.raw_score > item.final_score;
-                    return (
-                      <tr key={item.eval_id}>
-                        <td className="num"><strong>#{item.rank}</strong></td>
-                        <td>
-                          <div><strong>{item.file_name}</strong></div>
-                          <div style={{ fontSize: 12.5, color: "var(--ink-muted)" }}>{item.masked_contact}</div>
-                        </td>
-                        <td className="num">
-                          <strong>{fmtScore(item.final_score)}</strong>
-                          {capped && (
-                            <div style={{ fontSize: 12, color: "var(--fit-none-fg)" }}>
-                              Gốc: {fmtScore(item.raw_score)} (bị chặn)
-                            </div>
-                          )}
-                        </td>
-                        <td>
-                          <span className={`badge badge-level-${item.level}`}>{item.level_label}</span>
-                        </td>
-                        <td className="num">
-                          {fmtScore(item.criteria.sem)} / {fmtScore(item.criteria.skill)} / {fmtScore(item.criteria.exp)}
-                        </td>
-                        <td>
-                          {item.must_have_failed.length === 0 ? (
-                            <span style={{ color: "var(--fit-good-fg)", fontSize: 13 }}>Đạt yêu cầu</span>
-                          ) : (
-                            <span style={{ color: "var(--fit-none-fg)", fontSize: 13 }}>
-                              Vi phạm ({item.must_have_failed.join(", ")})
-                            </span>
-                          )}
-                        </td>
-                        <td>
-                          <div className="btn-row">
-                            <button className="btn-secondary" onClick={() => handleOpenDetail(item.eval_id)}>
-                              Xem giải thích
-                            </button>
-                            <button className="btn-danger-link" onClick={() => handleDeleteCandidate(item.candidate_id)}>
-                              Xóa
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        )}
-
-        {step === 4 && detail && (
-          <section>
-            <div className="page-header">
-              <div>
-                <h2>Chi tiết đánh giá: {detail.file_name}</h2>
-                <p>{detail.masked_contact}</p>
-              </div>
-              <button className="btn-secondary" onClick={() => setStep(3)}>
-                Quay lại bảng xếp hạng
-              </button>
-            </div>
-
-            {detail.must_have_failed && detail.must_have_failed.length > 0 && (
-              <div className="notice-bar notice-error">
-                Luật điều kiện bắt buộc đã kích hoạt ({detail.must_have_failed.join(", ")}): điểm bị giới hạn từ{" "}
-                <strong className="num">{fmtScore(detail.raw_score)}</strong> xuống{" "}
-                <strong className="num">{fmtScore(detail.final_score)}</strong> (dưới ngưỡng Phù hợp{" "}
-                <span className="num">{detail.thresholds.t2}</span>).
-              </div>
-            )}
-
-            <div className="score-hero-grid">
-              <div className="panel score-box">
-                <div>
-                  <div style={{ color: "var(--ink-muted)", fontSize: 13 }}>Điểm đánh giá cuối cùng</div>
-                  <div className="big-score num">{fmtScore(detail.final_score)}</div>
-                  <span className={`badge badge-level-${detail.level}`}>{detail.level_label}</span>
-                </div>
-
-                <div>
-                  <div className="threshold-track">
-                    <div
-                      className="threshold-marker"
-                      style={{ left: `${Math.min(100, Math.max(0, detail.final_score))}%` }}
-                      title={`Điểm cuối: ${detail.final_score}`}
-                    />
-                    {detail.raw_score > detail.final_score && (
-                      <div
-                        className="threshold-raw-marker"
-                        style={{ left: `${Math.min(100, Math.max(0, detail.raw_score))}%` }}
-                        title={`Điểm trước khi chặn: ${detail.raw_score}`}
-                      />
+                    ) : (
+                      cvs.map((c) => (
+                        <tr key={c.id}>
+                          <td className="num muted">{c.id}</td>
+                          <td className="strong">{c.file_name}</td>
+                          <td className="muted">{c.masked_contact}</td>
+                          <td>
+                            {c.status === "ok" ? (
+                              <span className="status-ok">Sẵn sàng chấm</span>
+                            ) : (
+                              <span className="pen">{c.error_message || "Không đọc được nội dung"}</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))
                     )}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          )}
+
+          {step === 3 && activeJob && (
+            <section>
+              <header className="sheet-head">
+                <div>
+                  <h1>Xếp hạng ứng viên</h1>
+                  <p className="lede">
+                    Sắp theo điểm cuối, hòa thì xét điểm trước khi giới hạn. Bấm vào một khoảng trên thước để lọc theo mức phù hợp.
+                  </p>
+                </div>
+                <button className="btn-quiet" disabled={busy} onClick={handleEvaluateAll}>
+                  {busy ? "Đang chấm..." : "Chấm lại"}
+                </button>
+              </header>
+
+              {ranking.length === 0 ? (
+                <p className="empty">Chưa có kết quả. Tải hồ sơ ở bước 2 rồi bấm Chấm.</p>
+              ) : (
+                <>
+                  <ScoreRuler
+                    items={ranking}
+                    t1={t1}
+                    t2={t2}
+                    counts={levelCounts}
+                    filter={levelFilter}
+                    onFilter={handleFilterChange}
+                  />
+
+                  <div className="table-wrap">
+                    <table className="ledger ranking">
+                      <thead>
+                        <tr>
+                          <th className="num">Hạng</th>
+                          <th>Ứng viên</th>
+                          <th className="num">Điểm</th>
+                          <th>Mức</th>
+                          <th className="num" title="Ngữ nghĩa, Kỹ năng, Kinh nghiệm">NN · KN · KNg</th>
+                          <th>Yêu cầu bắt buộc</th>
+                          <th><span className="visually-hidden">Thao tác</span></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {visibleRanking.map((item) => {
+                          const capped = item.must_have_failed?.length > 0 && item.raw_score > item.final_score;
+                          return (
+                            <tr key={item.eval_id}>
+                              <td className="num rank">{item.rank}</td>
+                              <td>
+                                <div className="strong">{item.file_name}</div>
+                                <div className="muted small">{item.masked_contact}</div>
+                              </td>
+                              <td className="num score-cell">
+                                {capped && <s className="raw-struck">{fmtScore(item.raw_score)}</s>}
+                                <span className={capped ? "pen-score" : "final"}>{fmtScore(item.final_score)}</span>
+                              </td>
+                              <td>
+                                <span className={`level level-${item.level}`}>{item.level_label}</span>
+                              </td>
+                              <td className="num muted">
+                                {fmtShort(item.criteria.sem)} · {fmtShort(item.criteria.skill)} · {fmtShort(item.criteria.exp)}
+                              </td>
+                              <td>
+                                {item.must_have_failed.length === 0 ? (
+                                  <span className="status-ok">Đủ</span>
+                                ) : (
+                                  <span className="pen">Thiếu {item.must_have_failed.join(", ")}</span>
+                                )}
+                              </td>
+                              <td className="row-actions">
+                                <button className="btn-link" onClick={() => handleOpenDetail(item.eval_id)}>
+                                  Xem lý do
+                                </button>
+                                <button className="btn-link btn-link-danger" onClick={() => handleDeleteCandidate(item.candidate_id)}>
+                                  Xóa
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                        {visibleRanking.length === 0 && (
+                          <tr>
+                            <td colSpan={7} className="muted">Không có ứng viên ở mức này.</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
                   </div>
-                  <div className="num" style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "var(--ink-muted)" }}>
-                    <span>0</span>
-                    <span>t1 = {detail.thresholds.t1}</span>
-                    <span>t2 = {detail.thresholds.t2}</span>
-                    <span>100</span>
-                  </div>
-                </div>
+                </>
+              )}
+            </section>
+          )}
 
-                <div className="num" style={{ fontSize: 12.5, color: "var(--ink-muted)", marginTop: 10 }}>
-                  Mô hình: {detail.model_version} | Thời gian: {detail.elapsed_ms} ms
-                </div>
-              </div>
-
-              <div className="panel">
-                <h3 className="panel-title">Điểm năm tiêu chí và trọng số (vạch xám = ngưỡng t2)</h3>
-                {CRITERIA_LABELS.map(([key, label]) => {
-                  const val = detail.criteria[key];
-                  const w = detail.weights?.[key] ?? 0;
-                  return (
-                    <div className="criteria-row" key={key}>
-                      <span>
-                        {label} <span className="num" style={{ color: "var(--ink-muted)", fontSize: 12 }}>({Math.round(w * 100)}%)</span>
-                      </span>
-                      <div className="criteria-track">
-                        <div className="criteria-fill" style={{ width: `${val === null || val === undefined ? 0 : Math.min(100, val)}%` }} />
-                        <div className="criteria-t2-line" style={{ left: `${detail.thresholds.t2}%` }} />
-                      </div>
-                      <span className="num" style={{ textAlign: "right", fontWeight: 600 }}>
-                        {val === null || val === undefined ? "—" : fmtScore(val)}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div className="two-col" style={{ marginBottom: 20 }}>
-              <div className="panel">
-                <h3 className="panel-title">Kỹ năng đáp ứng ({detail.matched.length})</h3>
-                <div className="skill-chip-wrap">
-                  {detail.matched.length === 0 ? (
-                    <span style={{ color: "var(--ink-muted)" }}>Không có kỹ năng trùng khớp.</span>
-                  ) : (
-                    detail.matched.map((m, i) => (
-                      <span key={i} className="skill-chip skill-matched num">
-                        {m.skill} ({m.type === "must" ? "bắt buộc" : "ưu tiên"}: {fmtScore(m.score * 100)})
-                      </span>
-                    ))
-                  )}
-                </div>
-              </div>
-
-              <div className="panel">
-                <h3 className="panel-title">Kỹ năng còn thiếu ({detail.missing.length})</h3>
-                <div className="skill-chip-wrap">
-                  {detail.missing.length === 0 ? (
-                    <span style={{ color: "var(--fit-good-fg)" }}>Đáp ứng đầy đủ kỹ năng yêu cầu.</span>
-                  ) : (
-                    detail.missing.map((m, i) => (
-                      <span key={i} className="skill-chip skill-missing">
-                        {m.skill} ({m.type === "must" ? "bắt buộc" : "ưu tiên"})
-                      </span>
-                    ))
-                  )}
-                </div>
-              </div>
-            </div>
-
-            <div className="panel">
-              <h3 className="panel-title">Đoạn CV khớp nhất với từng đoạn yêu cầu của JD</h3>
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th>Đoạn JD</th>
-                    <th>Đoạn CV đáp ứng cao nhất</th>
-                    <th>Độ tương đồng</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(detail.best_matches || []).map((bm) => (
-                    <tr key={bm.jd_chunk_idx}>
-                      <td><div className="excerpt-box">{bm.jd_excerpt}</div></td>
-                      <td><div className="excerpt-box">{bm.cv_excerpt}</div></td>
-                      <td className="num"><strong>{bm.similarity.toFixed(3).replace(".", ",")}</strong></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        )}
+          {step === 4 && detail && <Detail detail={detail} onBack={() => setStep(3)} />}
+        </div>
       </main>
     </div>
+  );
+}
+
+const TYPE_LABELS = {
+  skill: "kỹ năng",
+  experience: "kinh nghiệm",
+  education: "học vấn",
+  cert: "chứng chỉ",
+};
+
+function fmtShort(val) {
+  if (val === null || val === undefined) return "–";
+  return Math.round(Number(val));
+}
+
+const clampPct = (v) => Math.min(100, Math.max(0, Number(v) || 0));
+
+function ScoreRuler({ items, t1, t2, counts, filter, onFilter }) {
+  const bands = [
+    { level: "0", from: 0, to: t1, label: "Không phù hợp" },
+    { level: "1", from: t1, to: t2, label: "Tiềm năng" },
+    { level: "2", from: t2, to: 100, label: "Phù hợp" },
+  ];
+  return (
+    <figure className="ruler" aria-label="Phân bố điểm ứng viên trên thang 0 đến 100">
+      <div className="ruler-bands">
+        {bands.map((b) => (
+          <button
+            key={b.level}
+            className={`band band-${b.level} ${filter === b.level ? "is-on" : ""}`}
+            style={{ left: `${b.from}%`, width: `${b.to - b.from}%` }}
+            aria-pressed={filter === b.level}
+            onClick={() => onFilter(filter === b.level ? "all" : b.level)}
+          >
+            <span className="band-count num">{counts[b.level] || 0}</span>
+            <span className="band-label">{b.label}</span>
+          </button>
+        ))}
+      </div>
+      <div className="ruler-scale" aria-hidden="true">
+        {items.map((it, i) => {
+          const capped = it.raw_score > it.final_score && it.must_have_failed?.length > 0;
+          const dim = filter !== "all" && String(it.level) !== filter;
+          return (
+            <span key={it.eval_id} className={dim ? "is-dim" : ""}>
+              {capped && (
+                <span
+                  className="cap-line"
+                  style={{ left: `${clampPct(it.final_score)}%`, width: `${clampPct(it.raw_score) - clampPct(it.final_score)}%` }}
+                />
+              )}
+              <span
+                className={`tick tick-${it.level}`}
+                style={{ left: `${clampPct(it.final_score)}%`, animationDelay: `${i * 35}ms` }}
+                title={`#${it.rank} ${it.file_name}: ${fmtScore(it.final_score)}`}
+              />
+            </span>
+          );
+        })}
+        {[t1, t2].map((t) => (
+          <span key={t} className="threshold" style={{ left: `${t}%` }}>
+            <span className="num">{t}</span>
+          </span>
+        ))}
+      </div>
+      <div className="ruler-axis num" aria-hidden="true">
+        {[0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+          .filter((v) => Math.abs(v - t1) > 4 && Math.abs(v - t2) > 4)
+          .map((v) => (
+            <span key={v} className={v % 20 ? "minor" : ""} style={{ left: `${v}%` }}>{v}</span>
+          ))}
+      </div>
+      <figcaption className="muted small">
+        Mỗi vạch là một ứng viên. Đường đỏ nối điểm gốc với điểm sau khi bị giới hạn do thiếu yêu cầu bắt buộc.
+        {filter !== "all" && (
+          <>
+            {" "}
+            <button className="btn-link" onClick={() => onFilter("all")}>Bỏ lọc</button>
+          </>
+        )}
+      </figcaption>
+    </figure>
+  );
+}
+
+function Detail({ detail, onBack }) {
+  const capped = detail.must_have_failed?.length > 0 && detail.raw_score > detail.final_score;
+  const { t1, t2 } = detail.thresholds;
+  return (
+    <section>
+      <header className="sheet-head">
+        <div>
+          <h1>{detail.file_name}</h1>
+          <p className="lede">{detail.masked_contact}</p>
+        </div>
+        <button className="btn-quiet" onClick={onBack}>
+          Về bảng xếp hạng
+        </button>
+      </header>
+
+      <div className="verdict">
+        <div className="verdict-score">
+          <span className={`level level-${detail.level}`}>{detail.level_label}</span>
+          <div className="big-score num">
+            {fmtScore(detail.final_score)}
+            {capped && <s className="big-raw">{fmtScore(detail.raw_score)}</s>}
+          </div>
+          {capped && (
+            <p className="pen pen-note">
+              Thiếu {detail.must_have_failed.join(", ")}, nên điểm bị hạ từ {fmtScore(detail.raw_score)} xuống dưới ngưỡng Phù hợp ({t2}).
+            </p>
+          )}
+          <div className="mini-ruler" aria-hidden="true">
+            <span className="mini-band band-0" style={{ width: `${t1}%` }} />
+            <span className="mini-band band-1" style={{ width: `${t2 - t1}%` }} />
+            <span className="mini-band band-2" style={{ width: `${100 - t2}%` }} />
+            {capped && <span className="mini-raw" style={{ left: `${clampPct(detail.raw_score)}%` }} />}
+            <span className={`mini-mark tick-${detail.level}`} style={{ left: `${clampPct(detail.final_score)}%` }} />
+          </div>
+          <div className="mini-axis num muted small" aria-hidden="true">
+            <span>0</span>
+            <span style={{ left: `${t1}%` }}>{t1}</span>
+            <span style={{ left: `${t2}%` }}>{t2}</span>
+            <span style={{ left: "100%" }}>100</span>
+          </div>
+          <p className="muted small num">{detail.model_version}, {detail.elapsed_ms} ms</p>
+        </div>
+
+        <div className="criteria">
+          <h2 className="block-title">Năm tiêu chí</h2>
+          <table className="criteria-table">
+            <tbody>
+              {CRITERIA_LABELS.map(([key, label]) => {
+                const val = detail.criteria[key];
+                const w = detail.weights?.[key] ?? 0;
+                const none = val === null || val === undefined;
+                return (
+                  <tr key={key}>
+                    <th scope="row">
+                      {label}
+                      <span className="weight num">{Math.round(w * 100)}%</span>
+                    </th>
+                    <td className="bar-cell">
+                      <span className="bar">
+                        <span className="bar-fill" style={{ width: `${none ? 0 : clampPct(val)}%` }} />
+                        <span className="bar-t2" style={{ left: `${t2}%` }} />
+                      </span>
+                    </td>
+                    <td className="num bar-val">{none ? <span className="muted">không xét</span> : fmtScore(val)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          <p className="hint">Vạch dọc là ngưỡng Phù hợp ({t2}). Phần trăm là trọng số của tiêu chí trong điểm tổng.</p>
+        </div>
+      </div>
+
+      <div className="split">
+        <div className="block">
+          <h2 className="block-title">Có trong CV <span className="num muted">{detail.matched.length}</span></h2>
+          {detail.matched.length === 0 ? (
+            <p className="muted">Không có kỹ năng nào khớp.</p>
+          ) : (
+            <ul className="skill-list">
+              {detail.matched.map((m, i) => (
+                <li key={i}>
+                  <span className="skill-name">{m.skill}</span>
+                  <span className="skill-kind">{m.type === "must" ? "bắt buộc" : "ưu tiên"}</span>
+                  <span className="num skill-score">{fmtScore(m.score * 100)}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div className="block">
+          <h2 className="block-title">Còn thiếu <span className="num muted">{detail.missing.length}</span></h2>
+          {detail.missing.length === 0 ? (
+            <p className="status-ok">Đủ mọi kỹ năng yêu cầu.</p>
+          ) : (
+            <ul className="skill-list">
+              {detail.missing.map((m, i) => (
+                <li key={i} className={m.type === "must" ? "is-missing-must" : ""}>
+                  <span className="skill-name">{m.skill}</span>
+                  <span className="skill-kind">{m.type === "must" ? "bắt buộc" : "ưu tiên"}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+
+      <h2 className="block-title section-gap">Đoạn CV khớp nhất với từng đoạn JD</h2>
+      <div className="pairs">
+        {(detail.best_matches || []).map((bm) => (
+          <div className="pair" key={bm.jd_chunk_idx}>
+            <blockquote className="pair-jd">{bm.jd_excerpt}</blockquote>
+            <blockquote className="pair-cv">{bm.cv_excerpt}</blockquote>
+            <span className="pair-sim num" title="Độ tương đồng cosine">{bm.similarity.toFixed(2).replace(".", ",")}</span>
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
