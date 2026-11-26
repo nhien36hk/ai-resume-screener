@@ -67,3 +67,17 @@ def test_all_jsonl_and_all_parquet_exact_alignment():
     assert (df_jl["job_id"].astype(str).values == df_pq["job_id"].astype(str).values).all(), "Lệch job_id giữa jsonl và parquet"
     assert (df_jl["label"].astype(int).values == df_pq["label"].astype(int).values).all(), "Lệch label giữa jsonl và parquet"
 
+
+
+def test_strict_assignment_keeps_jd_and_cv_in_one_split():
+    """Chia chặt: không JD nào và không CV nào nằm ở 2 tập; cùng seed -> cùng kết quả."""
+    strict_assignment = importlib.import_module("scripts.04_make_splits").strict_assignment
+    from src.utils import compute_text_hash
+    df = load_all()
+    assigned = strict_assignment(df, seed=0)
+    kept = df.assign(split=assigned, cv_id=df["resume_text"].map(lambda t: compute_text_hash(t)[:12])).dropna(subset=["split"])
+    assert kept.groupby("job_id")["split"].nunique().max() == 1
+    assert kept.groupby("cv_id")["split"].nunique().max() == 1
+    assert set(kept["split"]) == {"train", "val", "test"}
+    assert 0.3 < len(kept) / len(df) < 0.8
+    assert assigned.equals(strict_assignment(df, seed=0))

@@ -6,7 +6,7 @@ import pandas as pd
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
-from src.data.loader import load_all, split_ids
+from src.data.loader import load_all, select_split
 from src.config import (
     ALL_PAIRS_PATH,
     CHUNK_OVERLAP,
@@ -16,7 +16,7 @@ from src.config import (
     SKILL_THRESHOLDS,
 )
 from src.features.skills import SKILL_SYNONYMS
-from src.features.text import chunk_text
+from src.features.text import chunk_text, prepare_finetune_text
 from src.scoring import (
     compute_cert_score,
     compute_edu_score,
@@ -69,9 +69,10 @@ def precompute_all_features(
     unique_cvs = {}
     for cv_text, group in tqdm(df.groupby("resume_text"), desc="Encode CVs"):
         cv_row = group.iloc[0]
-        chunks = chunk_text(cv_text, tokenizer, CHUNK_SIZE, CHUNK_OVERLAP)
+        cv_body = prepare_finetune_text(cv_text)  # V7: cùng bước bỏ phần đầu CV như khi huấn luyện M5
+        chunks = chunk_text(cv_body, tokenizer, CHUNK_SIZE, CHUNK_OVERLAP)
         chunk_embs = model.encode(chunks, normalize_embeddings=True, convert_to_numpy=True)
-        trunc_emb = model.encode([cv_text], normalize_embeddings=True, convert_to_numpy=True)[0]
+        trunc_emb = model.encode([cv_body], normalize_embeddings=True, convert_to_numpy=True)[0]
 
         cv_entities = cv_row.get("cv_entities", {})
         cv_skills = cv_entities.get("skills", [])
@@ -159,17 +160,18 @@ def precompute_all_features(
     return pd.DataFrame(rows)
     
 
-def get_split_features(feat_dir: Path, model: SentenceTransformer, seed: int) -> Dict[str, pd.DataFrame]:
-    """Bảng feature là cache duy nhất: all.parquet dùng chung mọi seed, cắt theo split_ids(seed)."""
+def get_split_features(feat_dir: Path, model: SentenceTransformer, seed: int, scheme: str = "jd") -> Dict[str, pd.DataFrame]:
+    """Bảng feature là cache duy nhất: all.parquet dùng chung mọi seed và scheme, cắt theo file index."""
     feat_dir.mkdir(parents=True, exist_ok=True)
     all_parquet = feat_dir / "all.parquet"
+    if all_parquet.exists():
+        df_feat = pd.read_parquet(all_parquet)
+        if "total_must_skills" not in df_feat.columns:
+            all_parquet.unlink(missing_ok=True)
+
     if not all_parquet.exists() or (ALL_PAIRS_PATH.exists() and all_parquet.stat().st_mtime < ALL_PAIRS_PATH.stat().st_mtime):
         print(f"Tính bảng feature toàn bộ -> {all_parquet}")
         precompute_all_features(load_all(), model).to_parquet(all_parquet, index=False)
 
     df_feat = pd.read_parquet(all_parquet)
-    splits = split_ids(seed)
-    return {
-        name: df_feat[df_feat["job_id"].isin(set(jds))].reset_index(drop=True)
-        for name, jds in splits.items()
-    }
+    return {name: select_split(df_feat, name, seed, scheme) for name in ("train", "val", "test")}

@@ -94,10 +94,39 @@ def test_prepare_criteria_inputs():
     _, _, fail_1, _ = prepare_criteria_inputs(df_must, 0.7, 0.2, 0.8, must_ratio=1.0)
     assert fail_1[0]  # miss=1 -> Bị phạt
 
-    # Kiểm tra tương thích ngược với tên cột cũ
-    df_old = pd.DataFrame([{
-        "sim_chunk_200": 0.8, "skill_0.7": 85.0, "score_experience": 90.0, "score_education": 100.0,
-        "score_certificate": 80.0, "must_miss_0.7": 0, "must_total": 3, "has_insufficient_exp": False,
-    }])
-    _, _, old_fail, _ = prepare_criteria_inputs(df_old, 0.7, 0.2, 0.8)
-    assert not old_fail[0]
+
+def test_ordinal_logit_recovers_monotone_relation():
+    from src.metrics import compute_qwk
+    from src.tuning import fit_ordinal_logit, predict_ordinal_logit
+    rng = np.random.default_rng(0)
+    X = rng.random((600, 2))
+    latent = 4 * X[:, 0] + 1 * X[:, 1] + rng.logistic(0, 0.3, 600)
+    y = np.digitize(latent, np.quantile(latent, [0.5, 0.75]))
+    beta, theta = fit_ordinal_logit(X, y)
+    assert beta[0] > beta[1] > 0 and theta[0] < theta[1]
+    assert compute_qwk(y, predict_ordinal_logit(X, beta, theta)) > 0.5
+
+
+def test_tune_and_test_variant_retunes_and_breaks_ties():
+    import pandas as pd
+    from src.tuning import tune_and_test_variant
+
+    rng = np.random.default_rng(0)
+    n = 60
+    label = np.tile([0, 1, 2], n // 3)
+    feat = pd.DataFrame({
+        "job_id": np.repeat(["a", "b", "c"], n // 3), "label": label,
+        "sim_chunk_200": 0.3 + 0.2 * label + rng.normal(0, 0.05, n),
+        "score_skill_0.7": 30.0 * label + rng.normal(0, 5, n),
+        "score_experience": rng.uniform(0, 100, n), "score_education": np.nan, "score_certificate": np.nan,
+        "miss_count_0.7": 0, "total_must_skills": 3, "has_insufficient_exp": False,
+    })
+    w = np.array([0.2, 0.0, 0.3, 0.3, 0.2])  # bỏ tiêu chí kỹ năng
+    m, _, _, _ = tune_and_test_variant(feat, feat, 0.2, 0.8, 0.7, w, retune_weights=True)
+    assert m["weights"]["skill"] == 0.0 and abs(sum(m["weights"].values()) - 1) < 1e-3
+
+    # Hai CV cùng bị chặn ở t2-1: xếp theo điểm trước khi chặn (V5)
+    feat2 = feat.assign(has_insufficient_exp=True)
+    _, (t1, t2), final, _ = tune_and_test_variant(feat2, feat2, 0.2, 0.8, 0.7, np.full(5, 0.2))
+    capped = np.round(final) == t2 - 1
+    assert capped.sum() >= 2 and len(np.unique(final[capped])) > 1

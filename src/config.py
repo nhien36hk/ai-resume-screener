@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 # Paths
@@ -67,7 +68,7 @@ CV_HEADERS = [
 DEFAULT_DATASET_NAME = "cnamuangtoun/resume-job-description-fit"
 DEFAULT_VLLM_MODEL = "/tmp/Qwen3-14B-FP8"
 DEFAULT_NVIDIA_MODEL = "nvidia/nemotron-3.5-super-vl-120b-a12b"
-DEFAULT_EMBEDDING_MODEL = "/tmp/paraphrase-multilingual-MiniLM-L12-v2"
+DEFAULT_EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")  # server offline: trỏ tới thư mục mô hình
 
 MAX_SEQ_LENGTH = 256
 CHUNK_SIZE = 200

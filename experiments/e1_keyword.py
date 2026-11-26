@@ -11,24 +11,24 @@ import numpy as np
 from src.config import RESULTS_DIR
 from src.data.loader import load_split
 from src.features.skills import is_exact_match
-from src.metrics import compute_all_metrics
-from src.tuning import search_best_thresholds
-from src.utils import save_json, to_markdown_table
+from src.metrics import compute_all_metrics, compute_spearman
+from src.tuning import search_best_thresholds, to_labels
+from src.utils import save_json, save_preds, to_markdown_table
 
 
 def score_cv_keywords(must_skills, nice_skills, cv_text):
-    if not must_skills and not nice_skills:
+    """Tiểu luận 3.7.1: 100 × (số kỹ năng JD có nguyên văn trong CV) / (tổng số kỹ năng JD).
+    Không trọng số, không bảng đồng nghĩa (synonyms={}), không độ tương đồng ngữ nghĩa."""
+    skills = list(dict.fromkeys(must_skills + nice_skills))
+    if not skills:
         return 0.0
-    total_w = len(must_skills) * 2.0 + len(nice_skills) * 1.0
-    matched_w = sum(2.0 for s in must_skills if is_exact_match(s, cv_text))
-    matched_w += sum(1.0 for s in nice_skills if is_exact_match(s, cv_text))
-    return 100.0 * (matched_w / total_w)
+    return 100.0 * sum(is_exact_match(s, cv_text, synonyms={}) for s in skills) / len(skills)
 
 
-def run_e1(seed: int) -> dict:
-    print(f"=== CHẠY THỰC NGHIỆM E1: BASELINE KEYWORD MATCH (Seed {seed}) ===")
-    df_val = load_split("val", seed)
-    df_test = load_split("test", seed)
+def run_e1(seed: int, scheme: str = "jd") -> dict:
+    print(f"=== CHẠY THỰC NGHIỆM E1: BASELINE KEYWORD MATCH (Seed {seed}, chia {scheme}) ===")
+    df_val = load_split("val", seed, scheme)
+    df_test = load_split("test", seed, scheme)
 
     val_scores = np.array([
         score_cv_keywords(
@@ -53,9 +53,7 @@ def run_e1(seed: int) -> dict:
     ], dtype=np.float32)
 
     y_test = df_test["label"].to_numpy()
-    test_preds = np.zeros_like(test_scores, dtype=int)
-    test_preds[test_scores >= best_t1] = 1
-    test_preds[test_scores >= best_t2] = 2
+    test_preds = to_labels(test_scores, best_t1, best_t2)
 
     metrics = compute_all_metrics(
         y_true=y_test,
@@ -77,9 +75,10 @@ def run_e1(seed: int) -> dict:
     md_table = to_markdown_table(headers, [row])
     print("\n" + md_table + "\n")
 
-    out_dir = RESULTS_DIR / f"seed{seed}"
+    out_dir = RESULTS_DIR / scheme / f"seed{seed}"
     out_dir.mkdir(parents=True, exist_ok=True)
-    res = {"seed": seed, "thresholds": (best_t1, best_t2), "metrics": metrics}
+    save_preds(out_dir, "M1", df_test, test_scores, test_preds)
+    res = {"seed": seed, "scheme": scheme, "thresholds": (best_t1, best_t2), "val_macro_f1": val_f1, "val_spearman": compute_spearman(y_val, val_scores), "metrics": metrics}
     save_json(out_dir / "e1.json", res)
     with open(out_dir / "e1.md", "w", encoding="utf-8") as f:
         f.write(f"# Kết quả Thực nghiệm E1: Baseline Keyword (Seed {seed})\n\n" + md_table + "\n")
@@ -89,5 +88,6 @@ def run_e1(seed: int) -> dict:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, required=True, help="Random seed phân chia dữ liệu.")
+    parser.add_argument("--scheme", choices=["jd", "strict"], default="jd", help="Cách chia dữ liệu.")
     args = parser.parse_args()
-    run_e1(args.seed)
+    run_e1(args.seed, args.scheme)

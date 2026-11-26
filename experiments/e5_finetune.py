@@ -1,4 +1,5 @@
 import argparse
+import time
 from pathlib import Path
 import sys
 
@@ -23,7 +24,7 @@ from src.data.loader import load_split
 from src.features.text import prepare_finetune_text
 from src.pipeline import get_split_features
 from src.tuning import CRITERIA, find_best_hyperparams, tune_and_test_variant
-from src.utils import load_json, save_json, to_markdown_table
+from src.utils import load_json, save_json, save_preds, to_markdown_table
 
 TARGET_MAP = {0: 0.0, 1: 0.5, 2: 1.0}
 
@@ -78,18 +79,19 @@ def train_e5(train_df, val_df, output_dir):
         callbacks=[EarlyStoppingCallback(early_stopping_patience=2)],
     )
 
+    t0 = time.perf_counter()
     trainer.train()
     model.save_pretrained(str(output_dir))
+    save_json(Path(output_dir) / "train_log.json", {"train_seconds": time.perf_counter() - t0, "log_history": trainer.state.log_history})
     return model
 
 
-def run_e5(seed: int) -> dict:
-    print(f"=== CHẠY THỰC NGHIỆM E5: FINE-TUNING MINILM-L12-V2 (Seed {seed}) ===")
-    df_train = load_split("train", seed)
-    df_val = load_split("val", seed)
-    df_test = load_split("test", seed)
+def run_e5(seed: int, scheme: str = "jd") -> dict:
+    print(f"=== CHẠY THỰC NGHIỆM E5: FINE-TUNING MINILM-L12-V2 (Seed {seed}, chia {scheme}) ===")
+    df_train = load_split("train", seed, scheme)
+    df_val = load_split("val", seed, scheme)
 
-    model_dir = ARTIFACTS_DIR / "models" / "e5_finetuned" / f"seed{seed}"
+    model_dir = ARTIFACTS_DIR / "models" / "e5_finetuned" / scheme / f"seed{seed}"
     if (model_dir / "config.json").exists():
         print(f"Nạp mô hình đã fine-tune có sẵn từ {model_dir}...")
         model = SentenceTransformer(str(model_dir))
@@ -97,8 +99,9 @@ def run_e5(seed: int) -> dict:
         print(f"Bắt đầu huấn luyện Fine-tune mô hình MiniLM cho seed {seed}...")
         model = train_e5(df_train, df_val, model_dir)
 
-    feat_dir = FEATURES_DIR / "minilm_finetuned" / f"seed{seed}"
-    tables = get_split_features(feat_dir, model, seed)
+    feat_dir = FEATURES_DIR / "minilm_finetuned" / scheme / f"seed{seed}"
+    tables = get_split_features(feat_dir, model, seed, scheme)
+    out_dir = RESULTS_DIR / scheme / f"seed{seed}"
     percentile_p5, percentile_p95 = (float(v) for v in np.percentile(tables["train"]["sim_chunk_200"], [5, 95]))
 
     print(f"\nTối ưu siêu tham số trên tập Val cho mô hình M5 (seed {seed})...")
@@ -112,23 +115,24 @@ def run_e5(seed: int) -> dict:
         return np.where(np.array(CRITERIA) == name, 0.0, weights)
 
     variants = [
-        ("M5: Full Model", weights, True, True),
-        ("Ablation M5: -Skill", without("skill"), False, True),
-        ("Ablation M5: -Exp", without("exp"), True, False),
-        ("Ablation M5: -Must-have", weights, False, False),
+        ("M5", "M5: Full Model", weights, True, True),
+        ("M5_-skill", "Ablation M5: -Skill", without("skill"), False, True),
+        ("M5_-exp", "Ablation M5: -Exp", without("exp"), True, False),
+        ("M5_-must", "Ablation M5: -Must-have", weights, False, False),
     ]
 
     print(f"\nĐánh giá Full M5 và các biến thể Ablation trên tập Test (seed {seed})...")
     results = []
-    for name, w_variant, skill_rule, exp_rule in variants:
-        m, (t1, t2) = tune_and_test_variant(tables["val"], tables["test"], percentile_p5, percentile_p95, threshold, w_variant, skill_rule, exp_rule, must_ratio=must_ratio)
-        results.append({"name": f"{name} (seed {seed})", "variant": name, "thresholds": (t1, t2), **m})
+    for code, name, w_variant, skill_rule, exp_rule in variants:
+        m, (t1, t2), final, preds = tune_and_test_variant(tables["val"], tables["test"], percentile_p5, percentile_p95, threshold, w_variant, skill_rule, exp_rule, must_ratio=must_ratio, retune_weights=code != "M5")
+        save_preds(out_dir, code, tables["test"], final, preds)
+        results.append({"name": f"{name} (seed {seed})", "variant": name, "code": code, "thresholds": (t1, t2), **m})
 
     full_m5 = results[0]
 
-    e4_path = RESULTS_DIR / f"seed{seed}" / "e4.json"
+    e4_path = out_dir / "e4.json"
     e4_data = load_json(e4_path, {})
-    m4_metrics = next((r for r in e4_data.get("results", []) if "Full" in r.get("variant", r.get("name", ""))), None)
+    m4_metrics = next((r for r in e4_data.get("results", []) if r.get("code") == "M4" or "Full" in r.get("variant", "")), None)
 
     headers = ["Mô hình / Biến thể", "Ngưỡng (t1, t2)", "QWK", "Δ QWK", "Macro-F1", "Δ F1", "MAE", "Spearman", "NDCG@10"]
     rows = []
@@ -170,18 +174,18 @@ def run_e5(seed: int) -> dict:
     md_table = to_markdown_table(headers, rows)
     print("\n" + md_table + "\n")
 
-    out_dir = RESULTS_DIR / f"seed{seed}"
     out_dir.mkdir(parents=True, exist_ok=True)
     best_config_dict = {**best_config, "weights": dict(zip(CRITERIA, weights.tolist())), "scaler": (percentile_p5, percentile_p95)}
-    res = {"seed": seed, "config": best_config_dict, "metrics": full_m5, "results": results}
+    res = {"seed": seed, "scheme": scheme, "config": best_config_dict, "metrics": full_m5, "results": results}
     save_json(out_dir / "e5.json", res)
     with open(out_dir / "e5.md", "w", encoding="utf-8") as f:
-        f.write(f"# Kết quả Thực nghiệm E5: So sánh M4 Pretrained vs M5 Fine-tuned và Ablation Study (Seed {seed})\n\n" + md_table + "\n")
+        f.write(f"# Kết quả Thực nghiệm E5: So sánh M4 Pretrained vs M5 Fine-tuned và Ablation Study (Seed {seed}, chia {scheme})\n\n" + md_table + "\n")
     return res
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, required=True, help="Random seed phân chia dữ liệu.")
+    parser.add_argument("--scheme", choices=["jd", "strict"], default="jd", help="Cách chia dữ liệu.")
     args = parser.parse_args()
-    run_e5(args.seed)
+    run_e5(args.seed, args.scheme)

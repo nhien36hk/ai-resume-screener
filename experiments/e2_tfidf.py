@@ -14,15 +14,15 @@ from src.config import RESULTS_DIR
 from src.data.loader import load_split
 from src.metrics import compute_all_metrics
 from src.scoring import scale_p5_p95
-from src.tuning import search_best_thresholds
-from src.utils import save_json, to_markdown_table
+from src.tuning import search_best_thresholds, to_labels
+from src.utils import save_json, save_preds, to_markdown_table
 
 
-def run_e2(seed: int) -> dict:
-    print(f"=== CHẠY THỰC NGHIỆM E2: BASELINE TF-IDF (Seed {seed}) ===")
-    df_train = load_split("train", seed)
-    df_val = load_split("val", seed)
-    df_test = load_split("test", seed)
+def run_e2(seed: int, scheme: str = "jd") -> dict:
+    print(f"=== CHẠY THỰC NGHIỆM E2: BASELINE TF-IDF (Seed {seed}, chia {scheme}) ===")
+    df_train = load_split("train", seed, scheme)
+    df_val = load_split("val", seed, scheme)
+    df_test = load_split("test", seed, scheme)
 
     unique_corpus = list(pd.unique(df_train["job_description_text"])) + list(pd.unique(df_train["resume_text"]))
     vectorizer = TfidfVectorizer(
@@ -31,6 +31,7 @@ def run_e2(seed: int) -> dict:
         min_df=2,
         max_df=0.9,
         sublinear_tf=True,
+        stop_words="english",  # tiểu luận 3.7.2: loại từ dừng tiếng Anh (chỉ cho TF-IDF, không cho Sentence Transformer)
     )
     vectorizer.fit(unique_corpus)
 
@@ -53,9 +54,7 @@ def run_e2(seed: int) -> dict:
     test_scores = np.array([scale_p5_p95(s, percentile_p5, percentile_p95) for s in test_sims], dtype=np.float32)
     y_test = df_test["label"].to_numpy()
 
-    test_preds = np.zeros_like(test_scores, dtype=int)
-    test_preds[test_scores >= best_t1] = 1
-    test_preds[test_scores >= best_t2] = 2
+    test_preds = to_labels(test_scores, best_t1, best_t2)
 
     metrics = compute_all_metrics(
         y_true=y_test,
@@ -77,9 +76,11 @@ def run_e2(seed: int) -> dict:
     md_table = to_markdown_table(headers, [row])
     print("\n" + md_table + "\n")
 
-    out_dir = RESULTS_DIR / f"seed{seed}"
+    out_dir = RESULTS_DIR / scheme / f"seed{seed}"
     out_dir.mkdir(parents=True, exist_ok=True)
-    res = {"seed": seed, "thresholds": (best_t1, best_t2), "scaler": (percentile_p5, percentile_p95), "metrics": metrics}
+    save_preds(out_dir, "M2", df_test, test_scores, test_preds)
+    res = {"seed": seed, "scheme": scheme, "thresholds": (best_t1, best_t2), "scaler": (percentile_p5, percentile_p95),
+           "val_macro_f1": val_f1, "metrics": metrics}
     save_json(out_dir / "e2.json", res)
     with open(out_dir / "e2.md", "w", encoding="utf-8") as f:
         f.write(f"# Kết quả Thực nghiệm E2: Baseline TF-IDF (Seed {seed})\n\n" + md_table + "\n")
@@ -89,5 +90,6 @@ def run_e2(seed: int) -> dict:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, required=True, help="Random seed phân chia dữ liệu.")
+    parser.add_argument("--scheme", choices=["jd", "strict"], default="jd", help="Cách chia dữ liệu.")
     args = parser.parse_args()
-    run_e2(args.seed)
+    run_e2(args.seed, args.scheme)

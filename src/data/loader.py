@@ -1,10 +1,17 @@
-"""Nạp dữ liệu từ all.jsonl theo file index từng seed."""
+"""Nạp dữ liệu từ all.jsonl theo file index từng seed.
+
+Hai cách chia (scheme):
+- "jd": GroupShuffleSplit theo job_id; file data/splits/seed{N}.json lưu danh sách job_id.
+- "strict": JD và CV đều chỉ thuộc một tập (theo góp ý GVHD); file data/splits/strict/seed{N}.json lưu danh sách pair_id.
+"""
 from typing import Dict, List
 
 import pandas as pd
 
 from src.config import ALL_PAIRS_PATH, SPLITS_DIR
 from src.utils import load_json
+
+SCHEMES = ("jd", "strict")
 
 
 def load_all() -> pd.DataFrame:
@@ -16,14 +23,27 @@ def load_all() -> pd.DataFrame:
     return df
 
 
-def split_ids(seed: int) -> Dict[str, List[str]]:
-    path = SPLITS_DIR / f"seed{seed}.json"
+def split_path(seed: int, scheme: str = "jd"):
+    return SPLITS_DIR / f"seed{seed}.json" if scheme == "jd" else SPLITS_DIR / scheme / f"seed{seed}.json"
+
+
+def split_ids(seed: int, scheme: str = "jd") -> Dict[str, List[str]]:
+    path = split_path(seed, scheme)
     if not path.exists():
-        raise FileNotFoundError(f"Không tìm thấy file index {path}. Vui lòng chạy: python scripts/04_make_splits.py --seeds {seed}")
+        raise FileNotFoundError(f"Không tìm thấy file index {path}. Chạy: python scripts/04_make_splits.py --scheme {scheme} --seeds {seed}")
     return load_json(path)
 
 
-def load_split(name: str, seed: int) -> pd.DataFrame:
-    df_all = load_all()
-    jds = set(split_ids(seed)[name])
-    return df_all[df_all["job_id"].isin(jds)].reset_index(drop=True)
+def select_split(df: pd.DataFrame, name: str, seed: int, scheme: str = "jd") -> pd.DataFrame:
+    """Cắt bảng (all.jsonl hoặc bảng feature) theo file index: scheme jd lọc job_id, strict lọc pair_id."""
+    ids = set(split_ids(seed, scheme)[name])
+    col = "job_id" if scheme == "jd" else "pair_id"
+    missing = ids - set(df[col])
+    if missing:
+        raise ValueError(f"{len(missing)} {col} trong file index không còn trong dữ liệu (vd {sorted(missing)[:3]}). "
+                         f"Chạy lại: python scripts/04_make_splits.py --scheme {scheme} --seeds {seed} --force")
+    return df[df[col].isin(ids)].reset_index(drop=True)
+
+
+def load_split(name: str, seed: int, scheme: str = "jd") -> pd.DataFrame:
+    return select_split(load_all(), name, seed, scheme)
