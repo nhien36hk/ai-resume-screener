@@ -20,7 +20,13 @@ export async function fetchJob(jobId) {
   return parseResponse(await fetch(`${API_BASE}/jobs/${jobId}`));
 }
 
-export async function createJob({ title, description }) {
+export async function createJob({ title, description, file }) {
+  if (file) {
+    const form = new FormData();
+    if (title) form.append("title", title);
+    form.append("file", file);
+    return parseResponse(await fetch(`${API_BASE}/jobs`, { method: "POST", body: form }));
+  }
   return parseResponse(
     await fetch(`${API_BASE}/jobs`, {
       method: "POST",

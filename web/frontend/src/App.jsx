@@ -59,6 +59,7 @@ export default function App() {
   const [levelFilter, setLevelFilter] = useState("all");
   const [detail, setDetail] = useState(null);
 
+  // busy: true = thao tác nhanh; chuỗi = thao tác chậm, hiện hộp chờ với nội dung đó.
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState(null);
 
@@ -112,12 +113,14 @@ export default function App() {
     setStep(1);
   }
 
-  async function handleCreateJob(e) {
+  async function handleCreateJob(e, file = null) {
     e.preventDefault();
-    setBusy(true);
+    setBusy(file ? `Đang đọc tệp JD ${file.name}` : "Đang phân tích mô tả công việc");
     setNotice(null);
     try {
-      const created = await createJob({ title: jdTitle, description: jdDesc });
+      // Tải tệp khi đang mở một vị trí cũ: bỏ tên cũ để lấy tên từ chính tệp JD.
+      const title = file && activeJob ? "" : jdTitle;
+      const created = await createJob({ title, description: jdDesc, file });
       await refreshJobs(created.id);
       setNotice({ type: "ok", text: `Đã phân tích và tạo vị trí "${created.title}". Kiểm tra lại các yêu cầu bắt buộc ở cột bên phải trước khi tải hồ sơ.` });
     } catch (err) {
@@ -161,7 +164,7 @@ export default function App() {
 
   async function handleFileSelect(fileList) {
     if (!activeJob || !fileList || fileList.length === 0) return;
-    setBusy(true);
+    setBusy(fileList.length === 1 ? `Đang đọc hồ sơ ${fileList[0].name}` : `Đang đọc ${fileList.length} hồ sơ`);
     setNotice(null);
     try {
       const res = await uploadCvs(activeJob.id, Array.from(fileList));
@@ -179,7 +182,7 @@ export default function App() {
 
   async function handleEvaluateAll() {
     if (!activeJob) return;
-    setBusy(true);
+    setBusy(`Đang chấm điểm ${cvs.filter((c) => c.status === "ok").length} hồ sơ`);
     setNotice(null);
     try {
       const res = await evaluateJob(activeJob.id);
@@ -334,7 +337,7 @@ export default function App() {
                 <div>
                   <h1>{activeJob ? activeJob.title : "Vị trí tuyển dụng mới"}</h1>
                   <p className="lede">
-                    Dán mô tả công việc, hệ thống sẽ tách ra kỹ năng, số năm kinh nghiệm và bằng cấp. Bạn sửa lại danh sách trước khi chấm hồ sơ.
+                    Tải tệp JD hoặc dán nội dung, hệ thống sẽ tách ra kỹ năng, số năm kinh nghiệm và bằng cấp. Bạn sửa lại danh sách trước khi chấm hồ sơ.
                   </p>
                 </div>
                 {activeJob && (
@@ -357,6 +360,26 @@ export default function App() {
                       placeholder="Ví dụ: Chuyên viên Phân tích Dữ liệu"
                     />
                   </div>
+                  <label
+                    className="drop drop-small"
+                    htmlFor="jd-file-input"
+                    onDragOver={(e) => e.preventDefault()}
+                    onDrop={(e) => e.dataTransfer.files[0] && handleCreateJob(e, e.dataTransfer.files[0])}
+                  >
+                    <span className="drop-main">{busy ? "Đang đọc tệp JD..." : "Tải tệp JD"}</span>
+                    <span className="drop-sub">PDF hoặc DOCX, tối đa 5 MB. Hoặc dán nội dung vào ô bên dưới.</span>
+                    <input
+                      id="jd-file-input"
+                      type="file"
+                      accept=".pdf,.docx"
+                      disabled={busy}
+                      onChange={(e) => {
+                        const f = e.target.files[0];
+                        e.target.value = ""; // cho phép chọn lại cùng tệp
+                        if (f) handleCreateJob(e, f);
+                      }}
+                    />
+                  </label>
                   <div className="field">
                     <label htmlFor="jd-desc">Nội dung</label>
                     <textarea
@@ -636,6 +659,18 @@ export default function App() {
           {step === 4 && detail && <Detail detail={detail} onBack={() => setStep(3)} />}
         </div>
       </main>
+
+      {typeof busy === "string" && (
+        <div className="overlay">
+          <div className="overlay-box" role="status" aria-live="polite">
+            <span className="spinner" aria-hidden="true" />
+            <p className="overlay-title">{busy}</p>
+            <p className="overlay-sub">
+              Mỗi tệp mất vài giây, trang vẫn đang chạy. Vui lòng không đóng hoặc tải lại trang.
+            </p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

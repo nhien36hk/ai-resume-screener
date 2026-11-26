@@ -360,6 +360,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   margin-bottom: 20px;
 }
 .drop:hover, .drop:focus-within { border-color: var(--pen-blue); background: #F4F5FD; }
+.drop-small { padding: 16px; margin-bottom: 16px; }
 .drop-main { font-size: 18px; font-weight: 600; color: var(--pen-blue-deep); }
 .drop-sub { font-size: 13.5px; color: var(--ink-soft); }
 .drop input { position: absolute; width: 1px; height: 1px; opacity: 0; }
@@ -643,6 +644,38 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .pair-cv { padding-left: 14px; border-left: 3px solid var(--pen-blue); }
 .pair-sim { font-size: 20px; font-weight: 700; text-align: right; color: var(--pen-blue-deep); }
 
+/* ---------- Hộp chờ khi đọc tệp / chấm điểm ---------- */
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(29, 32, 51, .32);
+}
+.overlay-box {
+  width: min(420px, 100%);
+  background: var(--paper);
+  border-radius: 12px;
+  padding: 28px 28px 24px;
+  text-align: center;
+  box-shadow: 0 24px 48px -16px rgba(29, 32, 51, .45);
+}
+.spinner {
+  display: inline-block;
+  width: 40px;
+  height: 40px;
+  border: 4px solid #DFE2F3;
+  border-top-color: var(--pen-blue);
+  border-radius: 50%;
+  animation: spin .8s linear infinite;
+}
+.overlay-title { margin: 16px 0 6px; font-size: 18px; font-weight: 700; overflow-wrap: anywhere; }
+.overlay-title::after { content: "..."; }
+.overlay-sub { margin: 0; font-size: 14px; color: var(--ink-soft); }
+@keyframes spin { to { transform: rotate(360deg); } }
+
 /* ---------- Thu nhỏ ---------- */
 @media (max-width: 960px) {
   .app-shell { grid-template-columns: minmax(0, 1fr); padding: 16px 16px 48px; gap: 18px; }
@@ -687,4 +720,5 @@ button, input, select, textarea { font: inherit; color: inherit; }
 @media (prefers-reduced-motion: reduce) {
   .tick { animation: none; }
   .band { transition: none; }
+  .spinner { animation-duration: 2.4s; }
 }
