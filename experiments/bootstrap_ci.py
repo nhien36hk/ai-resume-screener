@@ -4,6 +4,8 @@
 Macro-F1, QWK: lấy mẫu lại cặp; NDCG@10: lấy mẫu lại JD.
 """
 import argparse
+from concurrent.futures import ProcessPoolExecutor
+import os
 from pathlib import Path
 import sys
 
@@ -17,11 +19,25 @@ from src.config import RESULTS_DIR
 from src.metrics import compute_macro_f1, compute_ndcg_at_10, compute_qwk, paired_bootstrap_ci
 from src.utils import save_json, to_markdown_table
 
-COMPARISONS = [("M3b", "M2"), ("M3b", "M1"), ("M3b", "M3a"), ("M4", "M3b"), ("M4", "M2"), ("M5", "M4")]
+COMPARISONS = [("M3b", "M2"), ("M3b", "M1"), ("M3b", "M3a"), ("M4", "M3b"), ("M4", "M2"), ("M5", "M4"), ("M5", "M2")]
+
+
+def _metric_f1(d):
+    return compute_macro_f1(d["label"], d["pred"])
+
+
+def _metric_qwk(d):
+    return compute_qwk(d["label"], d["pred"])
+
+
+def _metric_ndcg(d):
+    return compute_ndcg_at_10(d["job_id"], d["label"], d["score"])
+
+
 METRICS = {  # tên -> (hàm trên DataFrame preds, lấy mẫu theo JD?)
-    "Macro-F1": (lambda d: compute_macro_f1(d["label"], d["pred"]), False),
-    "QWK": (lambda d: compute_qwk(d["label"], d["pred"]), False),
-    "NDCG@10": (lambda d: compute_ndcg_at_10(d["job_id"], d["label"], d["score"]), True),
+    "Macro-F1": (_metric_f1, False),
+    "QWK": (_metric_qwk, False),
+    "NDCG@10": (_metric_ndcg, True),
 }
 
 
@@ -40,18 +56,41 @@ def load_pairs(scheme: str, code_a: str, code_b: str):
     return pairs, seeds
 
 
+def _eval_task(task: tuple) -> dict:
+    scheme, code_a, code_b, name, n_boot = task
+    pairs, seeds = load_pairs(scheme, code_a, code_b)
+    fn, by_jd = METRICS[name]
+    point, lo, hi = paired_bootstrap_ci(pairs, fn, n_boot=n_boot, by_jd=by_jd)
+    return {
+        "a": code_a,
+        "b": code_b,
+        "metric": name,
+        "diff": point,
+        "ci_low": lo,
+        "ci_high": hi,
+        "significant": bool(lo > 0 or hi < 0),
+        "seeds": seeds,
+    }
+
+
 def run_bootstrap(scheme: str = "jd", n_boot: int = 1000) -> list:
-    out = []
+    tasks = []
     for code_a, code_b in COMPARISONS:
-        pairs, seeds = load_pairs(scheme, code_a, code_b)
+        pairs, _ = load_pairs(scheme, code_a, code_b)
         if not pairs:
             print(f"Bỏ qua {code_a} − {code_b}: thiếu file dự đoán")
             continue
-        for name, (fn, by_jd) in METRICS.items():
-            point, lo, hi = paired_bootstrap_ci(pairs, fn, n_boot=n_boot, by_jd=by_jd)
-            out.append({"a": code_a, "b": code_b, "metric": name, "diff": point, "ci_low": lo, "ci_high": hi,
-                        "significant": bool(lo > 0 or hi < 0), "seeds": seeds})
-            print(f"{code_a} − {code_b} | {name:8s}: {point:+.4f} [{lo:+.4f}, {hi:+.4f}] ({len(seeds)} seed)")
+        for name in METRICS:
+            tasks.append((scheme, code_a, code_b, name, n_boot))
+
+    out = []
+    if tasks:
+        n_cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
+        n_workers = max(1, min(n_cpus, len(tasks)))
+        with ProcessPoolExecutor(max_workers=n_workers) as pool:
+            out = list(pool.map(_eval_task, tasks))
+        for r in out:
+            print(f"{r['a']} − {r['b']} | {r['metric']:8s}: {r['diff']:+.4f} [{r['ci_low']:+.4f}, {r['ci_high']:+.4f}] ({len(r['seeds'])} seed)")
 
     out_dir = RESULTS_DIR / scheme
     out_dir.mkdir(parents=True, exist_ok=True)
