@@ -36,15 +36,15 @@ def test_search_best_weights_and_thresholds():
 
 
 def test_vectorized_combined_matches_scalar_formulas():
-    """aggregate + cap_must_have (dùng trong grid search) phải ra đúng như weighted_score + apply_must_have."""
+    """weighted_sum_scores + apply_must_have_penalty phải ra đúng như weighted_score + apply_must_have."""
     from src.scoring import apply_must_have, weighted_score
-    from src.tuning import CRITERIA, aggregate, cap_must_have, to_labels
+    from src.tuning import CRITERIA, apply_must_have_penalty, to_labels, weighted_sum_scores
 
     X = np.array([[80.0, 90.0, 100.0, 0.0, 0.0], [60.0, 50.0, 0.0, 70.0, 100.0]])
     M = np.array([[1, 1, 1, 0, 0], [1, 1, 0, 1, 1]], dtype=float)  # 0 = tiêu chí bị skip
     w = np.array([0.3, 0.2, 0.2, 0.15, 0.15])
     failed = np.array([True, False])
-    s = cap_must_have(aggregate(X, M, w), failed, t2=70)
+    s = apply_must_have_penalty(weighted_sum_scores(X, M, w), failed, t2=70)
 
     for i in range(2):
         scores = {c: (X[i, k] if M[i, k] else None) for k, c in enumerate(CRITERIA)}
@@ -59,18 +59,74 @@ def test_prepare_criteria_inputs():
     import pandas as pd
     from src.tuning import prepare_criteria_inputs
 
-    df = pd.DataFrame([{
+    # Kiểm tra với tên cột mới chuẩn
+    df_new = pd.DataFrame([{
         "sim_chunk_200": 0.8,
-        "skill_0.7": 85.0,
+        "score_skill_0.7": 85.0,
         "score_experience": 90.0,
         "score_education": 100.0,
         "score_certificate": np.nan,
-        "must_miss_0.7": 0,
+        "miss_count_0.7": 0,
+        "total_must_skills": 5,
         "has_insufficient_exp": False,
     }])
-    scores, mask, skill_fail, exp_fail = prepare_criteria_inputs(df, skill_threshold=0.7, percentile_p5=0.2, percentile_p95=0.8)
+    scores, mask, skill_fail, exp_fail = prepare_criteria_inputs(df_new, skill_threshold=0.7, percentile_p5=0.2, percentile_p95=0.8)
     assert scores.shape == (1, 5)
     assert mask.shape == (1, 5)
     assert mask[0, 4] == 0.0
     assert not skill_fail[0]
     assert not exp_fail[0]
+
+    # Kiểm tra các ngưỡng must_ratio
+    df_must = pd.DataFrame([
+        {"sim_chunk_200": 0.5, "score_skill_0.7": 80.0, "score_experience": 80.0, "score_education": 80.0, "score_certificate": 80.0,
+         "miss_count_0.7": 1, "total_must_skills": 4, "has_insufficient_exp": False},  # cov = 3/4 = 0.75
+    ])
+    _, _, fail_0, _ = prepare_criteria_inputs(df_must, 0.7, 0.2, 0.8, must_ratio=0.0)
+    assert not fail_0[0]
+
+    _, _, fail_half, _ = prepare_criteria_inputs(df_must, 0.7, 0.2, 0.8, must_ratio=0.5)
+    assert not fail_half[0]  # 0.75 >= 0.5 -> Đạt
+
+    _, _, fail_strict, _ = prepare_criteria_inputs(df_must, 0.7, 0.2, 0.8, must_ratio=0.8)
+    assert fail_strict[0]  # 0.75 < 0.8 -> Bị phạt
+
+    _, _, fail_1, _ = prepare_criteria_inputs(df_must, 0.7, 0.2, 0.8, must_ratio=1.0)
+    assert fail_1[0]  # miss=1 -> Bị phạt
+
+
+def test_ordinal_logit_recovers_monotone_relation():
+    from src.metrics import compute_qwk
+    from src.tuning import fit_ordinal_logit, predict_ordinal_logit
+    rng = np.random.default_rng(0)
+    X = rng.random((600, 2))
+    latent = 4 * X[:, 0] + 1 * X[:, 1] + rng.logistic(0, 0.3, 600)
+    y = np.digitize(latent, np.quantile(latent, [0.5, 0.75]))
+    beta, theta = fit_ordinal_logit(X, y)
+    assert beta[0] > beta[1] > 0 and theta[0] < theta[1]
+    assert compute_qwk(y, predict_ordinal_logit(X, beta, theta)) > 0.5
+
+
+def test_tune_and_test_variant_retunes_and_breaks_ties():
+    import pandas as pd
+    from src.tuning import tune_and_test_variant
+
+    rng = np.random.default_rng(0)
+    n = 60
+    label = np.tile([0, 1, 2], n // 3)
+    feat = pd.DataFrame({
+        "job_id": np.repeat(["a", "b", "c"], n // 3), "label": label,
+        "sim_chunk_200": 0.3 + 0.2 * label + rng.normal(0, 0.05, n),
+        "score_skill_0.7": 30.0 * label + rng.normal(0, 5, n),
+        "score_experience": rng.uniform(0, 100, n), "score_education": np.nan, "score_certificate": np.nan,
+        "miss_count_0.7": 0, "total_must_skills": 3, "has_insufficient_exp": False,
+    })
+    w = np.array([0.2, 0.0, 0.3, 0.3, 0.2])  # bỏ tiêu chí kỹ năng
+    m, _, _, _ = tune_and_test_variant(feat, feat, 0.2, 0.8, 0.7, w, retune_weights=True)
+    assert m["weights"]["skill"] == 0.0 and abs(sum(m["weights"].values()) - 1) < 1e-3
+
+    # Hai CV cùng bị chặn ở t2-1: xếp theo điểm trước khi chặn (V5)
+    feat2 = feat.assign(has_insufficient_exp=True)
+    _, (t1, t2), final, _ = tune_and_test_variant(feat2, feat2, 0.2, 0.8, 0.7, np.full(5, 0.2))
+    capped = np.round(final) == t2 - 1
+    assert capped.sum() >= 2 and len(np.unique(final[capped])) > 1

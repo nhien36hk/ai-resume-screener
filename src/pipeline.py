@@ -6,8 +6,9 @@ import pandas as pd
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
-from src.data.loader import load_split
+from src.data.loader import load_all, select_split
 from src.config import (
+    ALL_PAIRS_PATH,
     CHUNK_OVERLAP,
     CHUNK_SIZE,
     DEFAULT_EMBEDDING_MODEL,
@@ -15,7 +16,7 @@ from src.config import (
     SKILL_THRESHOLDS,
 )
 from src.features.skills import SKILL_SYNONYMS
-from src.features.text import chunk_text
+from src.features.text import chunk_text, prepare_finetune_text
 from src.scoring import (
     compute_cert_score,
     compute_edu_score,
@@ -25,7 +26,7 @@ from src.scoring import (
 )
 
 
-def build_feature_table(
+def precompute_all_features(
     df: pd.DataFrame,
     model: Optional[SentenceTransformer] = None,
 ) -> pd.DataFrame:
@@ -68,9 +69,10 @@ def build_feature_table(
     unique_cvs = {}
     for cv_text, group in tqdm(df.groupby("resume_text"), desc="Encode CVs"):
         cv_row = group.iloc[0]
-        chunks = chunk_text(cv_text, tokenizer, CHUNK_SIZE, CHUNK_OVERLAP)
+        cv_body = prepare_finetune_text(cv_text)  # V7: cùng bước bỏ phần đầu CV như khi huấn luyện M5
+        chunks = chunk_text(cv_body, tokenizer, CHUNK_SIZE, CHUNK_OVERLAP)
         chunk_embs = model.encode(chunks, normalize_embeddings=True, convert_to_numpy=True)
-        trunc_emb = model.encode([cv_text], normalize_embeddings=True, convert_to_numpy=True)[0]
+        trunc_emb = model.encode([cv_body], normalize_embeddings=True, convert_to_numpy=True)[0]
 
         cv_entities = cv_row.get("cv_entities", {})
         cv_skills = cv_entities.get("skills", [])
@@ -107,7 +109,7 @@ def build_feature_table(
         cv_skill_embeddings = cv_data["cv_skill_embeddings"]
 
         skill_scores = {}
-        must_misses = {}
+        miss_counts = {}
         for skill_threshold in SKILL_THRESHOLDS:
             score_skill, miss_count = compute_skill_score(
                 must_skills, nice_skills, cv_skills,
@@ -117,8 +119,8 @@ def build_feature_table(
                 skill_threshold=skill_threshold,
                 synonyms=SKILL_SYNONYMS,
             )
-            skill_scores[f"skill_{skill_threshold}"] = score_skill
-            must_misses[f"must_miss_{skill_threshold}"] = miss_count
+            skill_scores[f"score_skill_{skill_threshold}"] = score_skill
+            miss_counts[f"miss_count_{skill_threshold}"] = miss_count
 
         cv_years_exp = float(cv_entities.get("total_years_experience", 0.0))
         jd_min_years_exp = float(jd_entities.get("min_years_experience", 0.0))
@@ -144,8 +146,8 @@ def build_feature_table(
             "sim_chunk_200": sim_chunk_200,
             "sim_truncated_256": sim_truncated_256,
             **skill_scores,
-            **must_misses,
-            "must_total": len(must_skills),
+            **miss_counts,
+            "total_must_skills": len(must_skills),
             "score_experience": score_experience,
             "score_education": score_education,
             "score_certificate": score_certificate,
@@ -158,14 +160,18 @@ def build_feature_table(
     return pd.DataFrame(rows)
     
 
-def load_feature_tables(feat_dir: Path, model: SentenceTransformer) -> Dict[str, pd.DataFrame]:
-    """Bảng feature là cache duy nhất: có parquet thì đọc, chưa có thì tính rồi ghi."""
+def get_split_features(feat_dir: Path, model: SentenceTransformer, seed: int, scheme: str = "jd") -> Dict[str, pd.DataFrame]:
+    """Bảng feature là cache duy nhất: all.parquet dùng chung mọi seed và scheme, cắt theo file index."""
     feat_dir.mkdir(parents=True, exist_ok=True)
-    tables = {}
-    for split in ("train", "val", "test"):
-        path = feat_dir / f"{split}.parquet"
-        if not path.exists():
-            print(f"Tính bảng feature tập {split} -> {path}")
-            build_feature_table(load_split(split), model).to_parquet(path, index=False)
-        tables[split] = pd.read_parquet(path)
-    return tables
+    all_parquet = feat_dir / "all.parquet"
+    if all_parquet.exists():
+        df_feat = pd.read_parquet(all_parquet)
+        if "total_must_skills" not in df_feat.columns:
+            all_parquet.unlink(missing_ok=True)
+
+    if not all_parquet.exists() or (ALL_PAIRS_PATH.exists() and all_parquet.stat().st_mtime < ALL_PAIRS_PATH.stat().st_mtime):
+        print(f"Tính bảng feature toàn bộ -> {all_parquet}")
+        precompute_all_features(load_all(), model).to_parquet(all_parquet, index=False)
+
+    df_feat = pd.read_parquet(all_parquet)
+    return {name: select_split(df_feat, name, seed, scheme) for name in ("train", "val", "test")}

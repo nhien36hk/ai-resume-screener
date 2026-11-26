@@ -40,8 +40,40 @@ def test_ndcg_at_10():
 
 
 
-def test_evaluate_all_reports_both_ndcg_columns():
-    from src.metrics import evaluate_all
-    m = evaluate_all([2, 1, 0, 0, 0], [2, 2, 0, 0, 0], [90, 70, 30, 20, 10], ["J"] * 5)
-    assert "ndcg_10" in m and "ndcg_10_cont" in m   # spec (theo y_pred) + D8 (theo điểm liên tục)
-    assert abs(m["ndcg_10_cont"] - 1.0) < 1e-6
+def test_compute_all_metrics_ranks_by_continuous_score():
+    from src.metrics import compute_all_metrics
+    m = compute_all_metrics([2, 1, 0, 0, 0], [2, 2, 0, 0, 0], [90, 70, 30, 20, 10], ["J"] * 5)
+    assert abs(m["ndcg_10"] - 1.0) < 1e-6          # xếp theo điểm liên tục -> thứ tự hoàn hảo
+    assert m["accuracy"] == 0.8
+    assert sum(map(sum, m["confusion"])) == 5 and m["confusion"][1][2] == 1
+
+
+def test_ndcg_uses_exponential_gain():
+    # gain mũ: đặt nhãn 2 ở đầu đáng hơn hai nhãn 1 nhiều hơn gain tuyến tính
+    from sklearn.metrics import ndcg_score
+    y, s = [2, 1, 1, 0, 0], [10, 50, 40, 5, 1]
+    lin = ndcg_score([y], [s], k=5)
+    assert compute_ndcg_at_10(["J"] * 5, y, s) < lin
+
+
+def test_spearman_per_jd_skips_constant_labels():
+    from src.metrics import compute_spearman_per_jd
+    jobs = ["A"] * 5 + ["B"] * 5
+    y = [0, 1, 2, 0, 1] + [0] * 5          # JD B nhãn hằng -> bỏ
+    s = [1, 2, 3, 1, 2] + [5, 4, 3, 2, 1]
+    assert abs(compute_spearman_per_jd(jobs, y, s) - 1.0) < 1e-9
+
+
+def test_paired_bootstrap_identical_methods_gives_zero():
+    import pandas as pd
+    from src.metrics import paired_bootstrap_ci
+    rng = np.random.default_rng(0)
+    df = pd.DataFrame({"label": rng.integers(0, 3, 60), "pred": rng.integers(0, 3, 60),
+                       "score": rng.random(60), "job_id": np.repeat([f"J{i}" for i in range(10)], 6)})
+    f1 = lambda d: compute_macro_f1(d["label"], d["pred"])
+    nd = lambda d: compute_ndcg_at_10(d["job_id"], d["label"], d["score"])
+    assert paired_bootstrap_ci([(df, df)], f1, n_boot=50) == (0.0, 0.0, 0.0)
+    assert paired_bootstrap_ci([(df, df)], nd, n_boot=20, by_jd=True) == (0.0, 0.0, 0.0)
+    better = df.assign(pred=df["label"])
+    point, lo, hi = paired_bootstrap_ci([(better, df)], f1, n_boot=200)
+    assert point > 0 and lo > 0 and lo <= point <= hi

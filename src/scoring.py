@@ -160,11 +160,15 @@ def apply_must_have(
     cv_years_exp: float,
     jd_min_years_exp: float,
     t2: float = 70.0,
+    must_total: int = 0,
+    must_ratio: float = 1.0,
 ) -> Tuple[float, List[str]]:
-    """Nếu thiếu >= 1 must-skill HOẶC E_CV < 0.5 * E_JD: S_final = min(S, t2 - 1)."""
+    """Nếu tỉ lệ must-skill khớp < must_ratio HOẶC E_CV < 0.5 * E_JD: S_final = min(S, t2 - 1).
+    must_total=0 (không biết tổng): luật gốc, thiếu >= 1 must-skill là vi phạm (giống must_ratio=1)."""
     failed_reasons = []
 
-    if missing_must_skills >= 1:
+    skill_fail = missing_must_skills >= 1 if must_total <= 0 else 1.0 - missing_must_skills / must_total < must_ratio
+    if skill_fail:
         failed_reasons.append(f"missing_{missing_must_skills}_must_skills")
 
     if jd_min_years_exp is not None and jd_min_years_exp > 0.0:

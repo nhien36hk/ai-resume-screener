@@ -4,6 +4,9 @@ import os
 from pathlib import Path
 from typing import Any, List, Union
 
+import numpy as np
+import pandas as pd
+
 
 def compute_text_hash(text: str) -> str:
     return hashlib.md5(text.strip().encode("utf-8")).hexdigest()
@@ -50,3 +53,13 @@ def to_markdown_table(headers: List[str], rows: List[List[Any]]) -> str:
     ]
     return "\n".join([header_line, separator_line] + data_lines)
 
+
+
+def save_preds(out_dir: Union[str, Path], code: str, df: pd.DataFrame, scores, preds) -> None:
+    """Dự đoán Test từng cặp -> <out_dir>/preds/<code>.parquet (đầu vào cho bootstrap và phân tích lỗi)."""
+    path = Path(out_dir) / "preds" / f"{code}.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({
+        "pair_id": df["pair_id"].to_numpy(), "job_id": df["job_id"].to_numpy(), "label": df["label"].to_numpy(),
+        "score": np.asarray(scores, dtype=float), "pred": np.asarray(preds, dtype=int),
+    }).to_parquet(path, index=False)

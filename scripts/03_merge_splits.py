@@ -1,3 +1,8 @@
+"""Ghép cache thực thể JD/CV vào raw_dataset.parquet để xuất data/processed/all.jsonl.
+
+CẢNH BÁO: Chạy lại script này cần cache jd_cache.json và cv_cache.json đúng bản server,
+nếu không all.jsonl sẽ bị ghi đè bằng entity cũ.
+"""
 import argparse
 import json
 from pathlib import Path
@@ -13,41 +18,44 @@ import pandas as pd
 from tqdm import tqdm
 
 from src.config import (
+    ALL_PAIRS_PATH,
     CV_CACHE_PATH,
     JD_CACHE_PATH,
-    PROCESSED_DIR,
+    RAW_DIR,
 )
 from src.data.schemas import CVEntities, JDEntities, is_current
 from src.utils import compute_text_hash, load_json, to_markdown_table
 
 
-def process_split(
-    split_name: str,
-    data_dir: Path,
-    jd_cache: Dict[str, Any],
-    cv_cache: Dict[str, Any],
+def merge_all(
+    raw_path: Path = RAW_DIR / "raw_dataset.parquet",
+    output_path: Path = ALL_PAIRS_PATH,
+    jd_cache: Any = JD_CACHE_PATH,
+    cv_cache: Any = CV_CACHE_PATH,
     strict: bool = True,
 ) -> Dict[str, Any]:
-    parquet_path = data_dir / f"{split_name}.parquet"
-    if not parquet_path.exists():
-        raise FileNotFoundError(f"Không tìm thấy file parquet: {parquet_path}")
+    if not raw_path.exists():
+        raise FileNotFoundError(f"Không tìm thấy file raw: {raw_path}")
 
-    df = pd.read_parquet(parquet_path)
+    df = pd.read_parquet(raw_path)
     total_raw = len(df)
-    output_path = data_dir / f"{split_name}.jsonl"
+
+    jd_dict = jd_cache if isinstance(jd_cache, dict) else load_json(jd_cache, {})
+    cv_dict = cv_cache if isinstance(cv_cache, dict) else load_json(cv_cache, {})
+    print(f">>> Đã nạp Cache: {len(jd_dict):,} JD | {len(cv_dict):,} CV")
 
     kept_records: List[Dict[str, Any]] = []
     dropped_count = 0
     missing_jd_count = 0
     missing_cv_count = 0
 
-    for _, row in tqdm(df.iterrows(), total=total_raw, desc=f"Ghép tập {split_name}"):
+    for idx, row in tqdm(df.iterrows(), total=total_raw, desc="Ghép toàn bộ all.jsonl"):
         job_id = str(row["job_id"])
         resume_text = row["resume_text"]
         c_hash = compute_text_hash(resume_text)
 
-        jd_ent = jd_cache.get(job_id)
-        cv_ent = cv_cache.get(c_hash)
+        jd_ent = jd_dict.get(job_id)
+        cv_ent = cv_dict.get(c_hash)
 
         has_valid_jd = is_current(JDEntities, jd_ent)
         has_valid_cv = is_current(CVEntities, cv_ent)
@@ -60,7 +68,7 @@ def process_split(
                 missing_cv_count += 1
             continue
 
-        pair_id = f"{split_name}_{len(kept_records):05d}"
+        pair_id = f"P{idx:05d}"
         label_text = str(row["label_text"]) if "label_text" in row else str(row["label"])
         record = {
             "pair_id": pair_id,
@@ -75,12 +83,13 @@ def process_split(
         kept_records.append(record)
 
     if dropped_count > 0:
-        msg = (f"Tập {split_name}: {dropped_count}/{total_raw} mẫu thiếu entity hợp lệ "
+        msg = (f"Tổng cộng {dropped_count}/{total_raw} mẫu thiếu entity hợp lệ "
                f"({missing_jd_count} thiếu JD, {missing_cv_count} thiếu CV). Chạy lại scripts/02_extract_entities.py.")
         if strict:
             sys.exit(f"[LỖI] {msg} Dùng --no-strict nếu chấp nhận bỏ các mẫu này.")
         print(f"[CẢNH BÁO] {msg}")
 
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         for rec in kept_records:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -92,7 +101,7 @@ def process_split(
         label_dist[lbl] = label_dist.get(lbl, 0) + 1
 
     return {
-        "split": split_name,
+        "split": "all",
         "total_raw": total_raw,
         "kept": len(kept_records),
         "dropped": dropped_count,
@@ -104,59 +113,32 @@ def process_split(
     }
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Ghép cache thực thể JD/CV vào các split và lọc mẫu thiếu.")
-    parser.add_argument("--data-dir", type=Path, default=PROCESSED_DIR, help="Thư mục chứa dữ liệu processed.")
-    parser.add_argument("--jd-cache", type=Path, default=JD_CACHE_PATH, help="Đường dẫn file cache JD.")
-    parser.add_argument("--cv-cache", type=Path, default=CV_CACHE_PATH, help="Đường dẫn file cache CV.")
-    parser.add_argument("--splits", nargs="+", default=["train", "val", "test"], help="Danh sách splits cần xử lý.")
-    parser.add_argument("--strict", action=argparse.BooleanOptionalAction, default=True,
-                        help="Dừng với mã lỗi nếu có mẫu thiếu entity (mặc định bật), để test set không bị nhỏ đi âm thầm.")
-    return parser.parse_args()
-
-
 def main():
-    args = parse_args()
-    print("=" * 75)
-    print("BẮT ĐẦU QUY TRÌNH GHÉP CACHE VÀ XUẤT DATASET HOÀN CHỈNH (JSONL)")
-    print(f"Thư mục dữ liệu: {args.data_dir}")
-    print(f"Cache JD       : {args.jd_cache}")
-    print(f"Cache CV       : {args.cv_cache}")
-    print("=" * 75)
-
-    jd_cache = load_json(args.jd_cache, {})
-    cv_cache = load_json(args.cv_cache, {})
-    print(f">>> Đã nạp Cache: {len(jd_cache):,} JD | {len(cv_cache):,} CV")
+    parser = argparse.ArgumentParser(description="Ghép cache thực thể JD/CV vào raw_dataset.parquet.")
+    parser.add_argument("--raw-path", type=Path, default=RAW_DIR / "raw_dataset.parquet")
+    parser.add_argument("--output-path", type=Path, default=ALL_PAIRS_PATH)
+    parser.add_argument("--jd-cache", type=Path, default=JD_CACHE_PATH)
+    parser.add_argument("--cv-cache", type=Path, default=CV_CACHE_PATH)
+    parser.add_argument("--strict", action=argparse.BooleanOptionalAction, default=True)
+    args = parser.parse_args()
 
     start_time = time.time()
-    results = []
-
-    for split in args.splits:
-        stats = process_split(split, args.data_dir, jd_cache, cv_cache, strict=args.strict)
-        results.append(stats)
-
+    stats = merge_all(args.raw_path, args.output_path, args.jd_cache, args.cv_cache, strict=args.strict)
     elapsed = time.time() - start_time
-    print("\n" + "=" * 75)
-    print(f"TỔNG KẾT TIẾN TRÌNH GHÉP DỮ LIỆU (Thời gian: {elapsed:.2f}s):")
 
-    headers = ["Tập Split", "Gốc (Raw)", "Hợp lệ (Kept)", "Bị loại (Drop)", "JD thiếu", "CV thiếu", "JD duy nhất", "Phân bố nhãn"]
-    rows = [
-        [
-            r["split"],
-            f"{r['total_raw']:,}",
-            f"{r['kept']:,}",
-            f"{r['dropped']:,}",
-            f"{r['missing_jd']:,}",
-            f"{r['missing_cv']:,}",
-            f"{r['unique_jds']:,}",
-            r["labels"]
-        ]
-        for r in results
-    ]
-    print(to_markdown_table(headers, rows))
-    for r in results:
-        print(f"-> Đã lưu: {r['output_path']}")
-    print("=" * 75)
+    headers = ["Tập dữ liệu", "Gốc (Raw)", "Hợp lệ (Kept)", "Bị loại (Drop)", "JD thiếu", "CV thiếu", "JD duy nhất", "Phân bố nhãn"]
+    rows = [[
+        stats["split"],
+        f"{stats['total_raw']:,}",
+        f"{stats['kept']:,}",
+        f"{stats['dropped']:,}",
+        f"{stats['missing_jd']:,}",
+        f"{stats['missing_cv']:,}",
+        f"{stats['unique_jds']:,}",
+        stats["labels"]
+    ]]
+    print("\n" + to_markdown_table(headers, rows))
+    print(f"-> Đã lưu: {stats['output_path']} ({elapsed:.2f}s)")
 
 
 if __name__ == "__main__":

@@ -69,3 +69,11 @@ def test_education_degree_not_required_keeps_spec_formula():
     # JD không yêu cầu bậc (none) nhưng yêu cầu ngành: S_degree = 100 -> 0.7*100 + 0.3*S_major
     assert compute_edu_score("high_school", "none", "marketing_communications", "accounting_finance") == 70.0
     assert compute_edu_score("high_school", "none", "accounting_finance", "accounting_finance") == 100.0
+
+
+def test_apply_must_have_ratio_rule():
+    # 1/4 must thiếu: tỉ lệ khớp 0.75 -> đạt với ρ=0.75, vi phạm với ρ=1 (luật gốc)
+    ok, reasons = apply_must_have(80.0, 1, 5.0, 0.0, t2=70, must_total=4, must_ratio=0.75)
+    assert ok == 80.0 and reasons == []
+    capped, reasons = apply_must_have(80.0, 1, 5.0, 0.0, t2=70, must_total=4, must_ratio=1.0)
+    assert capped == 69.0 and reasons

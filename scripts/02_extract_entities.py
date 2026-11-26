@@ -26,7 +26,7 @@ from src.config import (
     FAILED_EXTRACTIONS_PATH,
     JD_CACHE_PATH,
     MAJOR_GROUPS,
-    PROCESSED_DIR,
+    RAW_DIR,
 )
 from src.data.extractor import NvidiaAPIBackend, VLLMBackend, extract_many
 from src.data.schemas import CVEntities, JDEntities, is_current
@@ -35,9 +35,9 @@ from src.utils import compute_text_hash, load_json, save_json, to_markdown_table
 KINDS = {"jd": JDEntities, "cv": CVEntities}
 
 
-def collect_items(data_dir: Path) -> dict[str, dict[str, str]]:
-    """Unique documents of all three splits: JDs keyed by job_id, CVs by text hash."""
-    df = pd.concat([pd.read_parquet(data_dir / f"{s}.parquet") for s in ("train", "val", "test")])
+def collect_items(raw_path: Path = RAW_DIR / "raw_dataset.parquet") -> dict[str, dict[str, str]]:
+    """Unique documents: JDs keyed by job_id, CVs by text hash."""
+    df = pd.read_parquet(raw_path)
     return {
         "jd": dict(zip(df["job_id"].astype(str), df["job_description_text"])),
         "cv": {compute_text_hash(t): t for t in df["resume_text"].unique()},
@@ -98,7 +98,7 @@ def print_summary(items: dict, caches: dict, counts: dict, elapsed: float) -> No
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Trích xuất thực thể JD/CV bằng LLM (NVIDIA API hoặc vLLM).")
-    p.add_argument("--data-dir", type=Path, default=PROCESSED_DIR)
+    p.add_argument("--raw-path", type=Path, default=RAW_DIR / "raw_dataset.parquet")
     p.add_argument("--jd-cache", type=Path, default=JD_CACHE_PATH)
     p.add_argument("--cv-cache", type=Path, default=CV_CACHE_PATH)
     p.add_argument("--failed-file", type=Path, default=FAILED_EXTRACTIONS_PATH)
@@ -121,7 +121,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    items = collect_items(args.data_dir)
+    items = collect_items(args.raw_path)
     caches = {"jd": load_json(args.jd_cache, {}), "cv": load_json(args.cv_cache, {})}
     failed_all = load_json(args.failed_file, {})
     failed = {k: failed_all.setdefault(f"{k}s", {}) for k in KINDS}

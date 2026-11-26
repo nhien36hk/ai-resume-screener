@@ -17,7 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config import DEFAULT_NVIDIA_MODEL, DEFAULT_VLLM_MODEL, JD_CACHE_PATH, PROCESSED_DIR
+from src.config import DEFAULT_NVIDIA_MODEL, DEFAULT_VLLM_MODEL, JD_CACHE_PATH, RAW_DIR
 from src.utils import load_json, save_json
 
 MAX_MUST = 5
@@ -104,10 +104,8 @@ def main():
     if not backup.exists():
         shutil.copy2(args.cache_path, backup)
 
-    jd_texts = {}
-    for split in ("train", "val", "test"):
-        df = pd.read_parquet(PROCESSED_DIR / f"{split}.parquet", columns=["job_id", "job_description_text"])
-        jd_texts.update(zip(df["job_id"].astype(str), df["job_description_text"]))
+    df = pd.read_parquet(RAW_DIR / "raw_dataset.parquet", columns=["job_id", "job_description_text"])
+    jd_texts = dict(zip(df["job_id"].astype(str), df["job_description_text"]))
     missing = [j for j in todo if j not in jd_texts]
     if missing:
         sys.exit(f"Không tìm thấy văn bản JD cho {len(missing)} job_id, vd {missing[:3]} — dừng, chưa ghi gì.")

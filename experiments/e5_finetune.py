@@ -1,3 +1,5 @@
+import argparse
+import time
 from pathlib import Path
 import sys
 
@@ -17,18 +19,17 @@ from sentence_transformers.evaluation import EmbeddingSimilarityEvaluator
 from sentence_transformers.losses import CosineSimilarityLoss
 from transformers import EarlyStoppingCallback
 
-from src.config import DEFAULT_EMBEDDING_MODEL, MAX_SEQ_LENGTH
+from src.config import ARTIFACTS_DIR, DEFAULT_EMBEDDING_MODEL, FEATURES_DIR, MAX_SEQ_LENGTH, RESULTS_DIR
 from src.data.loader import load_split
 from src.features.text import prepare_finetune_text
-from src.pipeline import load_feature_tables
-from src.tuning import CRITERIA, evaluate_combined_variant, tune_combined_model
-from src.utils import load_json, save_json, to_markdown_table
+from src.pipeline import get_split_features
+from src.tuning import CRITERIA, find_best_hyperparams, tune_and_test_variant
+from src.utils import load_json, save_json, save_preds, to_markdown_table
 
 TARGET_MAP = {0: 0.0, 1: 0.5, 2: 1.0}
 
 
 def build_pair_dataset(df: pd.DataFrame) -> Dataset:
-    # spec mục 7: cắt 256 token -> model tự cắt ở max_seq_length, không cắt theo ký tự
     jd_texts = [str(t) for t in df["job_description_text"]]
     cv_texts = [prepare_finetune_text(str(t)) for t in df["resume_text"]]
     scores = [TARGET_MAP.get(int(lbl), 0.0) for lbl in df["label"]]
@@ -60,11 +61,12 @@ def train_e5(train_df, val_df, output_dir):
         fp16=True,
         eval_strategy="epoch",
         save_strategy="epoch",
+        save_total_limit=1,
         load_best_model_at_end=True,
-        metric_for_best_model="eval_val_spearman_cosine",
-        save_total_limit=2,
-        seed=42,
+        metric_for_best_model="val_spearman_cosine",
+        greater_is_better=True,
         logging_steps=50,
+        report_to="none",
     )
 
     trainer = SentenceTransformerTrainer(
@@ -77,47 +79,70 @@ def train_e5(train_df, val_df, output_dir):
         callbacks=[EarlyStoppingCallback(early_stopping_patience=2)],
     )
 
+    t0 = time.perf_counter()
     trainer.train()
     model.save_pretrained(str(output_dir))
+    save_json(Path(output_dir) / "train_log.json", {"train_seconds": time.perf_counter() - t0, "log_history": trainer.state.log_history})
     return model
 
 
-def run_e5():
-    print("=== CHẠY THỰC NGHIỆM E5: FINE-TUNING MINILM-L12-V2 (M5) ===")
-    df_train = load_split("train")
-    df_val = load_split("val")
-    df_test = load_split("test")
+def run_e5(seed: int, scheme: str = "jd") -> dict:
+    print(f"=== CHẠY THỰC NGHIỆM E5: FINE-TUNING MINILM-L12-V2 (Seed {seed}, chia {scheme}) ===")
+    df_train = load_split("train", seed, scheme)
+    df_val = load_split("val", seed, scheme)
 
-    model_dir = PROJECT_ROOT / "artifacts" / "models" / "e5_finetuned"
+    model_dir = ARTIFACTS_DIR / "models" / "e5_finetuned" / scheme / f"seed{seed}"
     if (model_dir / "config.json").exists():
         print(f"Nạp mô hình đã fine-tune có sẵn từ {model_dir}...")
         model = SentenceTransformer(str(model_dir))
     else:
-        print("Bắt đầu huấn luyện Fine-tune mô hình MiniLM...")
+        print(f"Bắt đầu huấn luyện Fine-tune mô hình MiniLM cho seed {seed}...")
         model = train_e5(df_train, df_val, model_dir)
 
-    tables = load_feature_tables(PROJECT_ROOT / "artifacts" / "features" / "minilm_finetuned", model)
-    col_chunk = "sim_chunk_200" if "sim_chunk_200" in tables["train"].columns else "sim_chunk"
-    percentile_p5, percentile_p95 = (float(v) for v in np.percentile(tables["train"][col_chunk], [5, 95]))
+    feat_dir = FEATURES_DIR / "minilm_finetuned" / scheme / f"seed{seed}"
+    tables = get_split_features(feat_dir, model, seed, scheme)
+    out_dir = RESULTS_DIR / scheme / f"seed{seed}"
+    percentile_p5, percentile_p95 = (float(v) for v in np.percentile(tables["train"]["sim_chunk_200"], [5, 95]))
 
-    # Tune lại toàn bộ theo đúng giao thức mô hình kết hợp (percentile_p5, percentile_p95 trên Train; skill_threshold, weights, thresholds trên Val)
-    print("\nTối ưu siêu tham số trên tập Val cho mô hình M5...")
-    best_config = tune_combined_model(tables["val"], percentile_p5, percentile_p95)
+    print(f"\nTối ưu siêu tham số trên tập Val cho mô hình M5 (seed {seed})...")
+    best_config = find_best_hyperparams(tables["val"], percentile_p5, percentile_p95)
+    weights = best_config["weights"]
     threshold = best_config.get("skill_threshold", best_config.get("tau", 0.7))
-    m5_metrics, _ = evaluate_combined_variant(tables["val"], tables["test"], percentile_p5, percentile_p95, threshold, best_config["weights"])
-    print(f"-> M5 tối ưu: skill_threshold={threshold}, t=({best_config['t1']:.0f}, {best_config['t2']:.0f})")
-    best_config = {**best_config, "weights": dict(zip(CRITERIA, best_config["weights"].tolist())), "scaler": (percentile_p5, percentile_p95)}
+    must_ratio = best_config.get("must_ratio", 1.0)
+    print(f"-> M5 tối ưu (seed {seed}): skill_threshold={threshold}, must_ratio={must_ratio}, w={dict(zip(CRITERIA, np.round(weights, 2).tolist()))}, t=({best_config['t1']:.0f}, {best_config['t2']:.0f})")
 
-    e4_path = PROJECT_ROOT / "artifacts" / "results" / "e4.json"
+    def without(name):
+        return np.where(np.array(CRITERIA) == name, 0.0, weights)
+
+    variants = [
+        ("M5", "M5: Full Model", weights, True, True),
+        ("M5_-skill", "Ablation M5: -Skill", without("skill"), False, True),
+        ("M5_-exp", "Ablation M5: -Exp", without("exp"), True, False),
+        ("M5_-must", "Ablation M5: -Must-have", weights, False, False),
+    ]
+
+    print(f"\nĐánh giá Full M5 và các biến thể Ablation trên tập Test (seed {seed})...")
+    results = []
+    for code, name, w_variant, skill_rule, exp_rule in variants:
+        m, (t1, t2), final, preds = tune_and_test_variant(tables["val"], tables["test"], percentile_p5, percentile_p95, threshold, w_variant, skill_rule, exp_rule, must_ratio=must_ratio, retune_weights=code != "M5")
+        save_preds(out_dir, code, tables["test"], final, preds)
+        results.append({"name": f"{name} (seed {seed})", "variant": name, "code": code, "thresholds": (t1, t2), **m})
+
+    full_m5 = results[0]
+
+    e4_path = out_dir / "e4.json"
     e4_data = load_json(e4_path, {})
-    m4_metrics = next((r for r in e4_data.get("results", []) if "Full" in r["name"]), None)
+    m4_metrics = next((r for r in e4_data.get("results", []) if r.get("code") == "M4" or "Full" in r.get("variant", "")), None)
 
-    headers = ["Mô hình", "QWK", "Δ QWK", "Macro-F1", "Δ F1", "MAE", "Spearman", "NDCG@10"]
+    headers = ["Mô hình / Biến thể", "Ngưỡng (t1, t2)", "QWK", "Δ QWK", "Macro-F1", "Δ F1", "MAE", "Spearman", "NDCG@10"]
     rows = []
 
     if m4_metrics:
+        t1_m4, t2_m4 = m4_metrics.get("thresholds", ("-", "-"))
+        t_m4_str = f"({t1_m4:.0f}, {t2_m4:.0f})" if isinstance(t1_m4, (int, float)) else "-"
         rows.append([
-            "M4: Pretrained MiniLM",
+            f"M4: Pretrained MiniLM (seed {seed})",
+            t_m4_str,
             f"{m4_metrics['qwk']:.4f}",
             "-",
             f"{m4_metrics['macro_f1']:.4f}",
@@ -126,35 +151,41 @@ def run_e5():
             f"{m4_metrics['spearman']:.4f}",
             f"{m4_metrics['ndcg_10']:.4f}",
         ])
-        d_qwk = m5_metrics["qwk"] - m4_metrics["qwk"]
-        d_f1 = m5_metrics["macro_f1"] - m4_metrics["macro_f1"]
-        d_qwk_str = f"{d_qwk:+.4f}"
-        d_f1_str = f"{d_f1:+.4f}"
-    else:
-        d_qwk_str = "-"
-        d_f1_str = "-"
 
-    rows.append([
-        "M5: Fine-tuned MiniLM",
-        f"{m5_metrics['qwk']:.4f}",
-        d_qwk_str,
-        f"{m5_metrics['macro_f1']:.4f}",
-        d_f1_str,
-        f"{m5_metrics['mae']:.4f}",
-        f"{m5_metrics.get('spearman', 0.0):.4f}",
-        f"{m5_metrics.get('ndcg_10', 0.0):.4f}",
-    ])
+    baseline_qwk = m4_metrics["qwk"] if m4_metrics else full_m5["qwk"]
+    baseline_f1 = m4_metrics["macro_f1"] if m4_metrics else full_m5["macro_f1"]
+
+    for r in results:
+        t1, t2 = r["thresholds"]
+        d_qwk = f"{r['qwk'] - baseline_qwk:+.4f}"
+        d_f1 = f"{r['macro_f1'] - baseline_f1:+.4f}"
+        rows.append([
+            r["name"],
+            f"({t1:.0f}, {t2:.0f})",
+            f"{r['qwk']:.4f}",
+            d_qwk,
+            f"{r['macro_f1']:.4f}",
+            d_f1,
+            f"{r['mae']:.4f}",
+            f"{r.get('spearman', 0.0):.4f}",
+            f"{r.get('ndcg_10', 0.0):.4f}",
+        ])
 
     md_table = to_markdown_table(headers, rows)
     print("\n" + md_table + "\n")
 
-    out_dir = PROJECT_ROOT / "artifacts" / "results"
     out_dir.mkdir(parents=True, exist_ok=True)
-    save_json(out_dir / "e5.json", {"config": best_config, "metrics": m5_metrics})
+    best_config_dict = {**best_config, "weights": dict(zip(CRITERIA, weights.tolist())), "scaler": (percentile_p5, percentile_p95)}
+    res = {"seed": seed, "scheme": scheme, "config": best_config_dict, "metrics": full_m5, "results": results}
+    save_json(out_dir / "e5.json", res)
     with open(out_dir / "e5.md", "w", encoding="utf-8") as f:
-        f.write("# Kết quả Thực nghiệm E5: So sánh M4 Pretrained vs M5 Fine-tuned\n\n" + md_table + "\n")
-    print(f"Đã lưu kết quả vào {out_dir}/e5.json và e5.md")
+        f.write(f"# Kết quả Thực nghiệm E5: So sánh M4 Pretrained vs M5 Fine-tuned và Ablation Study (Seed {seed}, chia {scheme})\n\n" + md_table + "\n")
+    return res
 
 
 if __name__ == "__main__":
-    run_e5()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--seed", type=int, required=True, help="Random seed phân chia dữ liệu.")
+    parser.add_argument("--scheme", choices=["jd", "strict"], default="jd", help="Cách chia dữ liệu.")
+    args = parser.parse_args()
+    run_e5(args.seed, args.scheme)
